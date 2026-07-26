@@ -14,7 +14,7 @@ const TRACK_LENGTH = SEGMENT_COUNT * SEGMENT_LENGTH
 const CAMERA_HEIGHT = 1120
 const CAMERA_DEPTH = 0.9
 const MAX_SPEED = 12_800
-const MAX_HEALTH = 150
+const MAX_HEALTH = 100
 const PLAYER_Z = 900
 const LANES = 3
 
@@ -49,6 +49,8 @@ type Rider = {
   trafficCooldown: number
   hitTimer: number
   crashed: number
+  boostTimer: number
+  boostCooldown: number
 }
 
 type Traffic = {
@@ -146,14 +148,16 @@ function makeSimulation(): Simulation {
     color,
     z: 3_100 + index * 1_050,
     lane: [-0.62, 0.48, -0.08, 0.7, -0.74][index],
-    speed: MAX_SPEED * (0.7 + index * 0.023),
-    targetSpeed: MAX_SPEED * (0.78 + index * 0.025),
+    speed: MAX_SPEED * (0.82 + index * 0.02),
+    targetSpeed: MAX_SPEED * (0.95 + index * 0.013),
     health: 100,
     weave: index * 1.7,
-    attackCooldown: 1 + index * 0.3,
+    attackCooldown: 0.8 + index * 0.2,
     trafficCooldown: 0,
     hitTimer: 0,
     crashed: 0,
+    boostTimer: 0,
+    boostCooldown: 2.5 + index * 0.9,
   }))
 
   const traffic: Traffic[] = Array.from({ length: 22 }, (_, index) => ({
@@ -466,14 +470,31 @@ export default function RoadRashGame() {
         if (rival.hitTimer > 0) rival.hitTimer -= dt
         if (rival.attackCooldown > 0) rival.attackCooldown -= dt
         if (rival.trafficCooldown > 0) rival.trafficCooldown -= dt
+        if (rival.boostTimer > 0) rival.boostTimer -= dt
+        if (rival.boostCooldown > 0) rival.boostCooldown -= dt
         if (rival.crashed > 0) {
           rival.crashed -= dt
           rival.speed = Math.max(0, rival.speed - MAX_SPEED * 0.45 * dt)
           continue
         }
 
-        const catchUp = rival.z < sim.position - 4_000 ? MAX_SPEED * 0.12 : 0
+        // Rubber-band: the further a rival trails the player, the harder it pushes
+        // to close the gap — and it can briefly out-run the player's top speed.
+        const trail = sim.position + PLAYER_Z - rival.z
+        const catchUp = clamp(trail / 42_000, -0.06, 0.16) * MAX_SPEED
         let desiredSpeed = rival.targetSpeed + catchUp
+
+        // Nitro burst — rivals periodically kick a boost when they're behind or
+        // right on the player's tail, so they can surge alongside and brawl.
+        if (
+          rival.boostCooldown <= 0 &&
+          rival.boostTimer <= 0 &&
+          (trail > 1_200 || Math.abs(rival.z - sim.position - PLAYER_Z) < 3_000)
+        ) {
+          rival.boostTimer = 1.1 + Math.random() * 0.9
+          rival.boostCooldown = 3.4 + Math.random() * 2.6
+        }
+        if (rival.boostTimer > 0) desiredSpeed = Math.max(desiredSpeed, MAX_SPEED * 1.08)
         let avoidance = 0
         let closestBlocker: Traffic | undefined
         let closestGap = Number.POSITIVE_INFINITY
@@ -506,12 +527,18 @@ export default function RoadRashGame() {
           if (targetLane !== undefined) avoidance = Math.sign(targetLane - rival.lane)
         }
 
-        rival.speed = approach(rival.speed, desiredSpeed, MAX_SPEED * 0.11 * dt)
+        rival.speed = approach(rival.speed, desiredSpeed, MAX_SPEED * 0.17 * dt)
         rival.z += rival.speed * dt
         rival.weave += dt * (0.8 + rival.speed / MAX_SPEED)
         rival.lane += Math.sin(rival.weave) * dt * 0.075
         rival.lane += avoidance * dt * 0.72
-        rival.lane = clamp(rival.lane, -0.88, 0.88)
+        // Hunt the player: when clear of traffic and level with the player,
+        // ease into the player's lane to line up a swing.
+        const brawlDz = rival.z - sim.position - PLAYER_Z
+        if (avoidance === 0 && Math.abs(brawlDz) < 2_600) {
+          rival.lane += Math.sign(sim.playerX - rival.lane) * dt * 0.5
+        }
+        rival.lane = clamp(rival.lane, -0.92, 0.92)
 
         for (const car of sim.traffic) {
           const carGap = car.z - rival.z
@@ -558,12 +585,13 @@ export default function RoadRashGame() {
           rival.attackCooldown <= 0 &&
           sim.invulnerable <= 0
         ) {
-          sim.health = Math.max(0, sim.health - 8)
-          sim.hit = 0.35
-          sim.shake = 0.3
+          sim.health = Math.max(0, sim.health - 12)
+          sim.hit = 0.4
+          sim.shake = 0.34
           sim.invulnerable = 0.42
-          sim.playerX += (sim.playerX <= rival.lane ? -1 : 1) * 0.13
-          rival.attackCooldown = 2.1 + Math.random()
+          sim.playerX += (sim.playerX <= rival.lane ? -1 : 1) * 0.15
+          rival.attackCooldown = 1.5 + Math.random()
+          burst(sim, VIEW_W / 2 + sim.playerX * 40, VIEW_H * 0.7, "#ff5470", 12)
           setMessage(sim, `${rival.name} HIT YOU`, 0.8)
         }
       }
@@ -679,6 +707,15 @@ export default function RoadRashGame() {
       ctx.fillStyle = sky
       ctx.fillRect(0, 0, VIEW_W, VIEW_H)
 
+      // Starfield high in the sky — twinkles subtly, fades toward the sunset band.
+      for (let i = 0; i < 70; i++) {
+        const sx = (i * 197.31) % VIEW_W
+        const sy = (i * 71.7) % (horizon * 0.72)
+        const twinkle = 0.35 + 0.4 * Math.sin(sim.raceTime * 2 + i * 1.3)
+        ctx.fillStyle = `rgba(255,247,214,${twinkle * (1 - sy / (horizon * 0.9))})`
+        ctx.fillRect(sx, sy, i % 7 === 0 ? 2 : 1, i % 7 === 0 ? 2 : 1)
+      }
+
       const sunX = VIEW_W * 0.76 - track[base].curve * 10
       const glow = ctx.createRadialGradient(sunX, horizon - 58, 4, sunX, horizon - 58, 115)
       glow.addColorStop(0, "rgba(255,246,180,.95)")
@@ -703,6 +740,25 @@ export default function RoadRashGame() {
       ctx.lineTo(VIEW_W, horizon + 80)
       ctx.lineTo(0, horizon + 80)
       ctx.fill()
+
+      // City skyline sitting on the horizon, scrolling with parallax.
+      const cityShift = (sim.position * 0.006 + sim.playerX * 60) % 130
+      for (let b = -1; b < VIEW_W / 130 + 2; b++) {
+        const seed = ((b + 100) * 928.3) % 1
+        const bw = 46 + seed * 52
+        const bh = 30 + ((b * 53.7) % 78)
+        const bx = b * 130 - cityShift
+        const by = horizon + 14 - bh
+        ctx.fillStyle = "#0d1730"
+        ctx.fillRect(bx, by, bw, bh)
+        // lit windows
+        ctx.fillStyle = "rgba(255,206,120,.5)"
+        for (let wy = by + 6; wy < horizon + 8; wy += 8) {
+          for (let wx = bx + 5; wx < bx + bw - 4; wx += 9) {
+            if ((wx * 3 + wy * 7) % 5 < 2) ctx.fillRect(wx, wy, 3, 4)
+          }
+        }
+      }
 
       ctx.fillStyle = "#182d31"
       ctx.beginPath()
@@ -788,6 +844,10 @@ export default function RoadRashGame() {
           const side = (base + n) % 38 === 0 ? -1 : 1
           drawRoadsideTree(near.x + side * near.road * 1.55, near.y, near.road * 0.18)
         }
+        if ((base + n) % 15 === 0 && near.road > 20) {
+          const side = (base + n) % 30 === 0 ? -1 : 1
+          drawRoadsideLight(near.x + side * near.road * 1.28, near.y, near.road * 0.2, side)
+        }
         if ((base + n) % 11 === 0 && near.road > 250) {
           const roadGlint = ((base + n) % 3 - 1) * near.road * 0.28
           quad(
@@ -847,6 +907,30 @@ export default function RoadRashGame() {
         ctx.textAlign = "center"
         ctx.fillText(side < 0 ? "RASH" : "GO!", x, y - h * 0.71)
       }
+    }
+
+    const drawRoadsideLight = (x: number, y: number, size: number, side: number) => {
+      const h = clamp(size * 2.4, 12, 210)
+      const armLen = h * 0.22 * -side
+      ctx.strokeStyle = "#2b3340"
+      ctx.lineWidth = Math.max(1.5, h * 0.03)
+      ctx.beginPath()
+      ctx.moveTo(x, y)
+      ctx.lineTo(x, y - h)
+      ctx.lineTo(x + armLen, y - h)
+      ctx.stroke()
+      // warm lamp glow
+      const lampX = x + armLen
+      const lampY = y - h + h * 0.03
+      const glow = ctx.createRadialGradient(lampX, lampY, 1, lampX, lampY, h * 0.32)
+      glow.addColorStop(0, "rgba(255,214,140,.85)")
+      glow.addColorStop(1, "rgba(255,180,80,0)")
+      ctx.fillStyle = glow
+      ctx.beginPath()
+      ctx.arc(lampX, lampY, h * 0.32, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = "#ffe6a8"
+      ctx.fillRect(lampX - h * 0.05, lampY - h * 0.02, h * 0.1, h * 0.05)
     }
 
     const drawRoadsideTree = (x: number, y: number, size: number) => {
@@ -927,6 +1011,23 @@ export default function RoadRashGame() {
       ctx.beginPath()
       ctx.ellipse(x, y, width * 0.55, height * 0.075, 0, 0, Math.PI * 2)
       ctx.fill()
+      if (rival.boostTimer > 0 && rival.crashed <= 0) {
+        const flame = width * (0.5 + Math.random() * 0.3)
+        ctx.fillStyle = "#48cae4"
+        ctx.beginPath()
+        ctx.moveTo(x - width * 0.16, y - height * 0.02)
+        ctx.lineTo(x, y + flame)
+        ctx.lineTo(x + width * 0.16, y - height * 0.02)
+        ctx.closePath()
+        ctx.fill()
+        ctx.fillStyle = "#caf0f8"
+        ctx.beginPath()
+        ctx.moveTo(x - width * 0.07, y)
+        ctx.lineTo(x, y + flame * 0.55)
+        ctx.lineTo(x + width * 0.07, y)
+        ctx.closePath()
+        ctx.fill()
+      }
       ctx.fillStyle = "#101116"
       ctx.beginPath()
       ctx.ellipse(x, y - height * 0.04, width * 0.25, height * 0.16, 0, 0, Math.PI * 2)
@@ -1087,6 +1188,35 @@ export default function RoadRashGame() {
       }
       ctx.globalAlpha = 1
 
+      // Speed lines streaking past the camera — scale with velocity.
+      const speedRatio = sim.speed / MAX_SPEED
+      const boosting = Boolean((keysRef.current.shift || keysRef.current.k) && sim.nitro > 0 && speedRatio > 0.1)
+      if (speedRatio > 0.55 || boosting) {
+        const cx = VIEW_W / 2
+        const cy = VIEW_H * 0.46
+        const count = Math.floor((speedRatio - 0.4) * 26) + (boosting ? 22 : 0)
+        ctx.strokeStyle = boosting ? "rgba(180,240,255,.5)" : "rgba(255,255,255,.28)"
+        ctx.lineWidth = boosting ? 2.4 : 1.4
+        for (let i = 0; i < count; i++) {
+          const ang = (i * 137.5 + sim.raceTime * 40) * (Math.PI / 180)
+          const r0 = 120 + ((i * 53) % 260)
+          const len = 40 + speedRatio * 90 + (boosting ? 60 : 0)
+          ctx.beginPath()
+          ctx.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0 * 0.7)
+          ctx.lineTo(cx + Math.cos(ang) * (r0 + len), cy + Math.sin(ang) * (r0 + len) * 0.7)
+          ctx.stroke()
+        }
+      }
+
+      // Nitro tunnel — a cyan rush closing in from the edges while boosting.
+      if (boosting) {
+        const tunnel = ctx.createRadialGradient(VIEW_W / 2, VIEW_H * 0.5, VIEW_W * 0.16, VIEW_W / 2, VIEW_H * 0.5, VIEW_W * 0.62)
+        tunnel.addColorStop(0, "rgba(72,202,228,0)")
+        tunnel.addColorStop(1, "rgba(72,202,228,.4)")
+        ctx.fillStyle = tunnel
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H)
+      }
+
       if (sim.hit > 0) {
         const flash = ctx.createRadialGradient(VIEW_W / 2, VIEW_H / 2, 80, VIEW_W / 2, VIEW_H / 2, VIEW_W * 0.7)
         flash.addColorStop(0, "rgba(255,20,40,0)")
@@ -1094,6 +1224,13 @@ export default function RoadRashGame() {
         ctx.fillStyle = flash
         ctx.fillRect(0, 0, VIEW_W, VIEW_H)
       }
+
+      // Cinematic vignette to frame the action.
+      const vign = ctx.createRadialGradient(VIEW_W / 2, VIEW_H * 0.52, VIEW_H * 0.42, VIEW_W / 2, VIEW_H * 0.52, VIEW_H * 0.95)
+      vign.addColorStop(0, "rgba(0,0,0,0)")
+      vign.addColorStop(1, "rgba(0,0,0,.46)")
+      ctx.fillStyle = vign
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H)
       ctx.restore()
     }
 

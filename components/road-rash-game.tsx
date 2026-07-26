@@ -6,9 +6,11 @@ const VIEW_W = 1280
 const VIEW_H = 720
 const ROAD_WIDTH = 2200
 const SEGMENT_LENGTH = 200
-const SEGMENT_COUNT = 1550
-const TRACK_LENGTH = SEGMENT_COUNT * SEGMENT_LENGTH
 const DRAW_DISTANCE = 250
+const RACE_LENGTH = 780_000
+const FINISH_INDEX = RACE_LENGTH / SEGMENT_LENGTH
+const SEGMENT_COUNT = FINISH_INDEX + DRAW_DISTANCE
+const TRACK_LENGTH = SEGMENT_COUNT * SEGMENT_LENGTH
 const CAMERA_HEIGHT = 1120
 const CAMERA_DEPTH = 0.9
 const MAX_SPEED = 12_800
@@ -124,7 +126,7 @@ function buildTrack(): TrackSegment[] {
     if (section > 45 && section < 105) curve = Math.sin(((section - 45) / 60) * Math.PI) * 2.6
     if (section > 145 && section < 225) curve = -Math.sin(((section - 145) / 80) * Math.PI) * 3.5
     if (section > 255) curve = Math.sin(((section - 255) / 55) * Math.PI) * 1.7
-    if (i < 35 || i > SEGMENT_COUNT - 45) curve = 0
+    if (i < 35 || Math.abs(i - FINISH_INDEX) < 45 || i > SEGMENT_COUNT - 45) curve = 0
 
     const hillTarget =
       Math.sin(i * 0.017) * 520 +
@@ -536,8 +538,8 @@ export default function RoadRashGame() {
       if (sim.health <= 0) {
         sim.speed *= 0.25
         changePhase("wrecked")
-      } else if (sim.position >= TRACK_LENGTH - DRAW_DISTANCE * SEGMENT_LENGTH) {
-        sim.position = TRACK_LENGTH - DRAW_DISTANCE * SEGMENT_LENGTH
+      } else if (sim.position >= RACE_LENGTH) {
+        sim.position = RACE_LENGTH
         changePhase("finished")
       }
 
@@ -551,7 +553,7 @@ export default function RoadRashGame() {
         setHud({
           speed: Math.round((sim.speed / MAX_SPEED) * 198),
           health: Math.round(sim.health),
-          progress: Math.round(clamp(sim.position / (TRACK_LENGTH - DRAW_DISTANCE * SEGMENT_LENGTH), 0, 1) * 100),
+          progress: Math.round(clamp(sim.position / RACE_LENGTH, 0, 1) * 100),
           rank: 1 + sim.rivals.filter((rival) => rival.z > sim.position + PLAYER_Z).length,
           countdown: Math.ceil(sim.countdown),
           message: sim.messageTimer > 0 ? sim.message : "",
@@ -680,6 +682,24 @@ export default function RoadRashGame() {
           }
         }
 
+        const segmentIndex = base + n
+        if (segmentIndex >= FINISH_INDEX - 3 && segmentIndex <= FINISH_INDEX) {
+          const checkerRow = segmentIndex - (FINISH_INDEX - 3)
+          for (let cell = 0; cell < 12; cell++) {
+            const fraction = -1 + ((cell + 0.5) * 2) / 12
+            quad(
+              ctx,
+              near.x + near.road * fraction,
+              near.y,
+              near.road / 12,
+              far.x + far.road * fraction,
+              far.y,
+              far.road / 12,
+              (cell + checkerRow) % 2 === 0 ? "#f8f5eb" : "#11151a",
+            )
+          }
+        }
+
         if ((base + n) % 42 === 0 && near.road > 24) {
           const side = (base + n) % 84 === 0 ? -1 : 1
           drawRoadsideSign(near.x + side * near.road * 1.38, near.y, near.road * 0.12, side)
@@ -701,6 +721,36 @@ export default function RoadRashGame() {
             "rgba(255,255,255,.11)",
           )
         }
+        if (segmentIndex === FINISH_INDEX) {
+          drawFinishGantry(near.x, near.y, near.road)
+        }
+      }
+    }
+
+    const drawFinishGantry = (x: number, y: number, road: number) => {
+      const height = clamp(road * 0.82, 14, 245)
+      const postWidth = clamp(road * 0.035, 2, 15)
+      const left = x - road * 1.08
+      const right = x + road * 1.08
+      ctx.fillStyle = "#d9dde2"
+      ctx.fillRect(left - postWidth / 2, y - height, postWidth, height)
+      ctx.fillRect(right - postWidth / 2, y - height, postWidth, height)
+
+      const bannerHeight = height * 0.24
+      ctx.fillStyle = "#11151a"
+      ctx.fillRect(left, y - height, right - left, bannerHeight)
+      const tileWidth = (right - left) / 16
+      for (let tile = 0; tile < 16; tile++) {
+        ctx.fillStyle = tile % 2 === 0 ? "#f8f5eb" : "#e63946"
+        ctx.fillRect(left + tile * tileWidth, y - height, tileWidth, bannerHeight * 0.24)
+      }
+      if (height > 52) {
+        ctx.fillStyle = "#d9ff43"
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+        ctx.font = `950 ${clamp(height * 0.12, 8, 25)}px Arial`
+        ctx.fillText("FINISH", x, y - height + bannerHeight * 0.62)
+        ctx.textBaseline = "alphabetic"
       }
     }
 
@@ -923,26 +973,6 @@ export default function RoadRashGame() {
       ctx.restore()
     }
 
-    const drawSpeedLines = (sim: Simulation) => {
-      const intensity = clamp(sim.speed / MAX_SPEED - 0.55, 0, 0.6)
-      if (intensity <= 0) return
-      ctx.save()
-      ctx.globalAlpha = intensity * 0.75
-      ctx.strokeStyle = "#dce7ef"
-      ctx.lineWidth = 2
-      for (let i = 0; i < 11; i++) {
-        const seed = (i * 97 + Math.floor(sim.position * 0.025)) % 1000
-        const x = VIEW_W * 0.5 + ((seed / 1000) * 2 - 1) * VIEW_W * 0.48
-        const y = VIEW_H * (0.58 + ((i * 41) % 37) / 100)
-        const pull = (x - VIEW_W / 2) * 0.12
-        ctx.beginPath()
-        ctx.moveTo(x - pull, y - 24)
-        ctx.lineTo(x, y + 22 + intensity * 90)
-        ctx.stroke()
-      }
-      ctx.restore()
-    }
-
     const render = () => {
       const sim = simRef.current
       const shakeX = sim.shake > 0 ? (Math.random() - 0.5) * 18 * Math.min(1, sim.shake * 4) : 0
@@ -953,7 +983,6 @@ export default function RoadRashGame() {
       const base = projectRoad(sim)
       drawBackdrop(sim, base)
       drawRoad(base)
-      drawSpeedLines(sim)
 
       const drawables: Array<{ z: number; kind: "rival" | "traffic"; point: { x: number; y: number; road: number }; entity: Rider | Traffic }> = []
       for (const car of sim.traffic) {

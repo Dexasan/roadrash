@@ -15,6 +15,7 @@ const CAMERA_HEIGHT = 1120
 const CAMERA_DEPTH = 0.9
 const MAX_SPEED = 12_800
 const MAX_HEALTH = 100
+const RIVAL_HEALTH = 150
 const PLAYER_Z = 900
 const LANES = 3
 
@@ -150,7 +151,7 @@ function makeSimulation(): Simulation {
     lane: [-0.62, 0.48, -0.08, 0.7, -0.74][index],
     speed: MAX_SPEED * (0.82 + index * 0.02),
     targetSpeed: MAX_SPEED * (0.95 + index * 0.013),
-    health: 100,
+    health: RIVAL_HEALTH,
     weave: index * 1.7,
     attackCooldown: 0.8 + index * 0.2,
     trafficCooldown: 0,
@@ -354,6 +355,11 @@ export default function RoadRashGame() {
 
     const attack = (sim: Simulation) => {
       if (sim.attack > 0) return
+      // A punch only lands on actual contact: the rival must be level with the
+      // player (alongside, not far ahead/behind) AND within a fist's reach to
+      // the side. Anything looser is just swinging at air.
+      const PUNCH_REACH_Z = 300
+      const PUNCH_REACH_LANE = 0.5
       let target: Rider | undefined
       let best = Number.POSITIVE_INFINITY
       for (const rival of sim.rivals) {
@@ -361,14 +367,16 @@ export default function RoadRashGame() {
         const dz = rival.z - sim.position
         const laneGap = Math.abs(rival.lane - sim.playerX)
         const score = Math.abs(dz - PLAYER_Z) + laneGap * 900
-        if (Math.abs(dz - PLAYER_Z) < 680 && laneGap < 0.72 && score < best) {
+        if (Math.abs(dz - PLAYER_Z) < PUNCH_REACH_Z && laneGap < PUNCH_REACH_LANE && score < best) {
           target = rival
           best = score
         }
       }
       sim.attack = 0.38
       if (!target) {
+        // Whiff — arm swings toward wherever you're leaning, but nothing connects.
         sim.attackSide = sim.playerX > 0 ? 1 : -1
+        setMessage(sim, "MISSED!", 0.4)
         return
       }
       sim.attackSide = target.lane >= sim.playerX ? 1 : -1
@@ -580,8 +588,8 @@ export default function RoadRashGame() {
           sim.playerX += (sim.playerX <= rival.lane ? -1 : 1) * dt * 0.35
         }
         if (
-          Math.abs(dz) < 520 &&
-          laneGap < 0.58 &&
+          Math.abs(dz) < 340 &&
+          laneGap < 0.5 &&
           rival.attackCooldown <= 0 &&
           sim.invulnerable <= 0
         ) {
@@ -692,7 +700,7 @@ export default function RoadRashGame() {
           countdown: Math.ceil(sim.countdown),
           message: sim.messageTimer > 0 ? sim.message : "",
           rival: nearby?.name ?? "",
-          rivalHealth: nearby?.health ?? 100,
+          rivalHealth: nearby ? (nearby.health / RIVAL_HEALTH) * 100 : 100,
           nitro: Math.round(sim.nitro),
         })
       }
@@ -1085,8 +1093,8 @@ export default function RoadRashGame() {
         ctx.fillText(rival.name, x, y - height * 1.19)
         ctx.fillStyle = "rgba(0,0,0,.65)"
         ctx.fillRect(x - width * 0.35, y - height * 1.12, width * 0.7, Math.max(3, width * 0.05))
-        ctx.fillStyle = rival.health > 40 ? "#7ae582" : "#ff4d6d"
-        ctx.fillRect(x - width * 0.35, y - height * 1.12, width * 0.7 * (rival.health / 100), Math.max(3, width * 0.05))
+        ctx.fillStyle = rival.health > RIVAL_HEALTH * 0.4 ? "#7ae582" : "#ff4d6d"
+        ctx.fillRect(x - width * 0.35, y - height * 1.12, width * 0.7 * (rival.health / RIVAL_HEALTH), Math.max(3, width * 0.05))
       }
       ctx.restore()
     }

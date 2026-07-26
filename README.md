@@ -1,33 +1,61 @@
-# roadrash
+# Roadrash
 
-This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v0.app).
+> The first game I played became the first reason I wanted to understand computers.
 
-## Built with v0
+Roadrash is a playable browser tribute to **Road Rash**, the game that first made computers feel magical to me. I did not know what rendering loops, input systems, physics, or state machines were—I only knew that pressing a key could make something on a screen feel alive.
 
-This repository is linked to a [v0](https://v0.app) project. You can continue developing by visiting the link below -- start new chats to make changes, and v0 will push commits directly to this repo. Every merge to `main` will automatically deploy.
+This project turns that memory into a small engineering exercise: a motorcycle combat racer built directly with React, TypeScript, and the Canvas 2D API.
 
-[Continue working on v0 →](https://v0.app/chat/projects/prj_R5MBaVJ1Uyi8OwMBlt8BJKb06TuR)
-
-## Getting Started
-
-First, run the development server:
+## Play
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Control | Action |
+|---|---|
+| `↑` / `W` | Accelerate |
+| `↓` / `S` | Brake |
+| `← →` / `A D` | Steer |
+| `Space` / `J` / `F` | Punch |
 
-## Learn More
+Touch controls appear automatically on smaller screens.
 
-To learn more, take a look at the following resources:
+## Under the hood
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-- [v0 Documentation](https://v0.app/docs) - learn about v0 and how to use it.
+- Pseudo-3D road projection using hand-built canvas segments
+- Curves, elevation, rumble strips, lane markers, and finite track progress
+- RequestAnimationFrame game loop with delta-time updates
+- Rival riders with movement, attacks, health, and knockdown state
+- Ambient road traffic and collision handling
+- Player acceleration, braking, off-road drag, steering, and centrifugal force
+- Keyboard and pointer-based mobile input
+- Throttled React HUD updates separated from the mutable simulation state
+
+## Why this repository exists
+
+This is not intended as a reproduction of the original commercial game or its assets. It is an original, non-commercial fan tribute built from code and simple geometric rendering. The goal is to preserve the feeling of the experience that first pulled me toward computers while demonstrating the engineering behind a small browser game.
+
+## Stack
+
+- Next.js 16
+- React 19
+- TypeScript
+- Canvas 2D
+- Tailwind CSS
+- Vercel Analytics
+
+## Validation
+
+```bash
+pnpm build
+```
+
+The production build runs in GitHub Actions on every push and pull request.
+
+---
+
+Built by [Sandesh Chapagain](https://github.com/Dexasan).

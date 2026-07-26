@@ -1,88 +1,73 @@
 import RoadRashGame from "@/components/road-rash-game"
 
-const buildNotes = [
-  ["Pseudo-3D road", "Perspective projection turns flat canvas segments into a fast, curving highway."],
-  ["Real-time simulation", "Physics, rivals, traffic, combat, health, and race position update every frame."],
-  ["Two input modes", "Keyboard controls on desktop and purpose-built touch controls on mobile."],
-  ["Zero game engine", "The renderer and gameplay loop are written directly with React and Canvas 2D."],
+const features = [
+  ["01", "REAL RIVALS", "Five named riders fight, weave, overtake, and stay visible from the starting pack to the finish."],
+  ["02", "ROAD COMBAT", "Pull alongside, land a punch, watch their health drop, and knock them out of the race."],
+  ["03", "ARCADE TRAFFIC", "Read the lanes, split traffic, burn nitro, and survive a fast coast run."],
 ]
 
 export default function Page() {
   return (
     <main>
-      <nav className="site-nav" aria-label="Main navigation">
-        <a className="wordmark" href="#top"><span>RR</span> ROADRASH</a>
-        <div>
-          <a href="#story">The story</a>
-          <a href="#build">How it works</a>
-          <a className="nav-play" href="#play">Play now</a>
+      <header className="arcade-nav">
+        <a href="#play" className="arcade-brand" aria-label="Roadrash home">
+          <span>RR</span>
+          <b>ROADRASH</b>
+        </a>
+        <div className="arcade-nav-meta">
+          <span>ORIGINAL BROWSER TRIBUTE</span>
+          <a href="#about">THE BUILD</a>
         </div>
-      </nav>
+      </header>
 
-      <section className="hero" id="top">
-        <div className="speed-lines" aria-hidden="true" />
-        <div className="hero-copy">
-          <p className="eyebrow">A browser tribute by Sandesh Chapagain</p>
-          <h1>The game that<br/><em>started everything.</em></h1>
-          <p className="hero-lead">Road Rash was the first game I ever played. The speed, the chaos, and the mystery of how a computer could create a world like that hooked me—and started a curiosity that eventually became engineering.</p>
-          <div className="hero-actions">
-            <a className="primary-action" href="#play">Start the race <span>↓</span></a>
-            <a className="secondary-action" href="#story">Read my story</a>
-          </div>
-        </div>
-        <div className="hero-poster" aria-label="A stylized road disappearing into a sunset">
-          <div className="sun" />
-          <div className="mountains left" />
-          <div className="mountains right" />
-          <div className="road">
-            <i/><i/><i/>
-          </div>
-          <div className="bike-mark">01</div>
-          <p><span>1990s energy</span><b>Rebuilt for the browser</b></p>
-        </div>
-        <div className="hero-stats">
-          <span><b>Canvas 2D</b> renderer</span>
-          <span><b>6</b> racers</span>
-          <span><b>199 mph</b> top speed</span>
-          <span><b>0</b> game engines</span>
-        </div>
-      </section>
-
-      <section className="story" id="story">
-        <div className="section-index">01 / ORIGIN STORY</div>
-        <div className="story-grid">
-          <h2>Before I knew what code was, I knew I wanted to understand <em>this.</em></h2>
+      <section className="arcade-hero" id="play">
+        <div className="arcade-grid" aria-hidden="true" />
+        <div className="arcade-heading">
+          <p><i /> READY TO RIDE</p>
+          <h1>THE COAST<br />DOESN&apos;T PLAY <em>FAIR.</em></h1>
           <div>
-            <p>Road Rash was my first encounter with a computer game. I did not know about rendering loops, input systems, physics, or state machines. I only knew that pressing a key could make something on a screen feel alive.</p>
-            <p>That feeling stayed with me. This project is not an attempt to reproduce the original game exactly. It is a small, hand-built thank-you to the experience that made computers feel less like machines and more like places where ideas could become real.</p>
-            <blockquote>“The first game I played became the first reason I wanted to understand computers.”</blockquote>
+            <span>FIVE RIVALS</span>
+            <span>HEAVY TRAFFIC</span>
+            <span>ZERO RULES</span>
           </div>
         </div>
-      </section>
 
-      <section className="play-section" id="play">
-        <div className="play-heading">
-          <div><p className="eyebrow">Playable in your browser</p><h2>Enough nostalgia.<br/>Take the bike.</h2></div>
-          <p>Race five rivals, dodge traffic, and fight your way to the finish. Use the keyboard on desktop or the on-screen controls on mobile.</p>
-        </div>
-        <div className="game-frame">
-          <div className="frame-bar"><span><i/> LIVE BUILD</span><b>road-rash.browser</b><small>v1.0</small></div>
+        <div className="arcade-cabinet">
+          <div className="cabinet-top">
+            <span><i /> LIVE</span>
+            <b>COAST RUN / RACE 01</b>
+            <small>HI-SCORE 084250</small>
+          </div>
           <RoadRashGame />
         </div>
+        <p className="play-note">CLICK START RACE, THEN USE YOUR KEYBOARD. TOUCH CONTROLS APPEAR ON MOBILE.</p>
       </section>
 
-      <section className="build" id="build">
-        <div className="section-index">02 / UNDER THE HOOD</div>
-        <div className="build-intro">
-          <h2>A tiny racing engine,<br/>built from first principles.</h2>
-          <p>The interesting part is not the visual polish. It is the systems underneath: a projected track, a deterministic game loop, rival behavior, collisions, combat, and responsive controls—all running inside one browser tab.</p>
+      <section className="manifesto" id="about">
+        <div className="manifesto-title">
+          <p>BUILT FROM THE ASPHALT UP</p>
+          <h2>Not a demo.<br />A proper little <em>arcade game.</em></h2>
         </div>
-        <div className="build-grid">{buildNotes.map(([title,copy],index)=><article key={title}><span>0{index+1}</span><h3>{title}</h3><p>{copy}</p></article>)}</div>
+        <p className="manifesto-copy">
+          This is an original, non-commercial browser tribute to the motorcycle combat games that
+          made 1990s computers feel dangerous and alive. The road, physics, rival AI, combat,
+          traffic, and rendering are all hand-built with TypeScript and Canvas 2D.
+        </p>
+        <div className="feature-row">
+          {features.map(([number, title, copy]) => (
+            <article key={number}>
+              <span>{number}</span>
+              <h3>{title}</h3>
+              <p>{copy}</p>
+            </article>
+          ))}
+        </div>
       </section>
 
-      <footer>
-        <div><b>ROADRASH / A PERSONAL TRIBUTE</b><p>Built by Sandesh Chapagain as a tribute to the first game that made computers feel magical.</p></div>
-        <a href="https://github.com/Dexasan/roadrash">View source on GitHub ↗</a>
+      <footer className="arcade-footer">
+        <div><b>ROADRASH</b><span>A PERSONAL BROWSER TRIBUTE</span></div>
+        <p>Built by Sandesh Chapagain</p>
+        <a href="https://github.com/Dexasan/roadrash">SOURCE ↗</a>
       </footer>
     </main>
   )

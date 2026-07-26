@@ -8,29 +8,29 @@ const siteUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
-  title: "Roadrash — The game that started everything",
-  description: "A playable browser tribute by Sandesh Chapagain to Road Rash—the first game he played and the experience that sparked his fascination with computers.",
-  authors: [{name: "Sandesh Chapagain", url: "https://github.com/Dexasan"}],
+  title: "Roadrash — Browser Motorcycle Combat",
+  description: "Race, fight, and weave through traffic in an original browser arcade tribute built with Canvas 2D.",
+  authors: [{ name: "Sandesh Chapagain", url: "https://github.com/Dexasan" }],
   creator: "Sandesh Chapagain",
   openGraph: {
-    title: "Roadrash — The game that started everything",
-    description: "A playable tribute to the first game that made me curious about computers.",
+    title: "Roadrash — Browser Motorcycle Combat",
+    description: "Five riders. One finish line. No clean racing.",
     type: "website",
     images: ["/og.png"],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Roadrash — The game that started everything",
-    description: "A playable browser tribute to the game that sparked my fascination with computers.",
+    title: "Roadrash — Browser Motorcycle Combat",
+    description: "Five riders. One finish line. No clean racing.",
     images: ["/og.png"],
   },
 }
 
 export const viewport: Viewport = {
-  themeColor: "#0b0a09",
+  themeColor: "#080b0f",
   colorScheme: "dark",
 }
 
-export default function RootLayout({children}: Readonly<{children: React.ReactNode}>) {
-  return <html lang="en"><body>{children}{process.env.NODE_ENV==="production"&&<Analytics/>}</body></html>
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return <html lang="en"><body>{children}{process.env.NODE_ENV === "production" && <Analytics />}</body></html>
 }

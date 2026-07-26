@@ -2,837 +2,926 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-const WIDTH = 1000
-const HEIGHT = 600
-const ROAD_WIDTH = 2000
+const VIEW_W = 1280
+const VIEW_H = 720
+const ROAD_WIDTH = 2200
 const SEGMENT_LENGTH = 200
-const CAMERA_HEIGHT = 1200
-const CAMERA_DEPTH = 0.84
-const DRAW_DISTANCE = 180
+const SEGMENT_COUNT = 1550
+const TRACK_LENGTH = SEGMENT_COUNT * SEGMENT_LENGTH
+const DRAW_DISTANCE = 250
+const CAMERA_HEIGHT = 1120
+const CAMERA_DEPTH = 0.9
+const MAX_SPEED = 12_800
+const PLAYER_Z = 900
 const LANES = 3
-const N_SEGMENTS = 2600
-const TRACK_LENGTH = N_SEGMENTS * SEGMENT_LENGTH
-const FINISH = TRACK_LENGTH - DRAW_DISTANCE * SEGMENT_LENGTH
 
-const MAX_SPEED = SEGMENT_LENGTH * 60 // units per second
-const ACCEL = MAX_SPEED / 4
-const BRAKING = -MAX_SPEED
-const DECEL = -MAX_SPEED / 5
-const OFF_ROAD_DECEL = -MAX_SPEED / 1.6
-const OFF_ROAD_LIMIT = MAX_SPEED / 4
-const CENTRIFUGAL = 0.32
+const RIVAL_DATA = [
+  ["AXEL", "#ffca3a"],
+  ["VIPER", "#4cc9f0"],
+  ["RIPPER", "#ef476f"],
+  ["NITRO", "#80ed99"],
+  ["SLASH", "#c77dff"],
+] as const
 
-const RIVAL_NAMES = ["Viper", "Diesel", "Skull", "Reaper", "Blitz"]
+type Phase = "menu" | "countdown" | "racing" | "finished" | "wrecked"
+type Keys = Record<string, boolean>
 
-// Palette (game rendered on canvas)
-const COLORS = {
-  sky: "#1b1035",
-  skyGlow: "#ff7a3c",
-  mountain: "#2a1a4a",
-  fog: "#241640",
-  grassLight: "#173a2a",
-  grassDark: "#123024",
-  roadLight: "#3a3a44",
-  roadDark: "#33333c",
-  rumbleLight: "#e2e2e6",
-  rumbleDark: "#b3121a",
-  lane: "#e8c84a",
-}
-
-type Segment = {
+type TrackSegment = {
   index: number
   z: number
-  curve: number
   y: number
-  p1: Projected
-  p2: Projected
-  colorIndex: number
+  curve: number
 }
 
-type Projected = {
-  wx: number
-  wy: number
-  wz: number
-  sx: number
-  sy: number
-  sw: number
-  scale: number
-}
-
-type Rival = {
+type Rider = {
   name: string
   z: number
-  offset: number // -1..1
+  lane: number
   speed: number
+  targetSpeed: number
   health: number
-  down: boolean
-  hitFlash: number
-  swingCooldown: number
   color: string
+  weave: number
+  attackCooldown: number
+  hitTimer: number
+  crashed: number
 }
 
-type Car = {
+type Traffic = {
   z: number
-  offset: number
+  lane: number
   speed: number
   color: string
+  type: "car" | "van"
 }
 
-type GamePhase = "menu" | "playing" | "won" | "busted"
+type Particle = {
+  x: number
+  y: number
+  vx: number
+  vy: number
+  life: number
+  color: string
+}
+
+type ScreenPoint = {
+  x: number
+  y: number
+  road: number
+  scale: number
+  visible: boolean
+}
 
 type Hud = {
   speed: number
   health: number
   progress: number
   rank: number
-  total: number
-  rivalsLeft: number
+  countdown: number
   message: string
+  rival: string
+  rivalHealth: number
+  nitro: number
 }
 
-function proj(): Projected {
-  return { wx: 0, wy: 0, wz: 0, sx: 0, sy: 0, sw: 0, scale: 0 }
+type Simulation = {
+  position: number
+  playerX: number
+  speed: number
+  health: number
+  nitro: number
+  lean: number
+  attack: number
+  attackSide: -1 | 1
+  hit: number
+  shake: number
+  countdown: number
+  raceTime: number
+  message: string
+  messageTimer: number
+  rivals: Rider[]
+  traffic: Traffic[]
+  particles: Particle[]
 }
 
-function buildTrack(): Segment[] {
-  const segs: Segment[] = []
-  for (let i = 0; i < N_SEGMENTS; i++) {
-    // Smooth wandering curve + occasional sharp bends
-    const curve =
-      Math.sin(i * 0.012) * 2.4 +
-      Math.sin(i * 0.031) * 1.6 +
-      Math.sin(i * 0.003) * 3.2
-    const y =
-      Math.sin(i * 0.018) * 900 +
-      Math.sin(i * 0.006) * 1800
-    segs.push({
-      index: i,
-      z: i * SEGMENT_LENGTH,
-      curve: i < 40 ? 0 : curve, // straight start
-      y: i < 40 ? 0 : y,
-      p1: proj(),
-      p2: proj(),
-      colorIndex: Math.floor(i / 3) % 2,
-    })
+const clamp = (value: number, min: number, max: number) =>
+  Math.max(min, Math.min(max, value))
+
+const approach = (value: number, target: number, amount: number) =>
+  value < target ? Math.min(target, value + amount) : Math.max(target, value - amount)
+
+function buildTrack(): TrackSegment[] {
+  const segments: TrackSegment[] = []
+  let elevation = 0
+
+  for (let i = 0; i < SEGMENT_COUNT; i++) {
+    let curve = 0
+    const section = i % 310
+    if (section > 45 && section < 105) curve = Math.sin(((section - 45) / 60) * Math.PI) * 2.6
+    if (section > 145 && section < 225) curve = -Math.sin(((section - 145) / 80) * Math.PI) * 3.5
+    if (section > 255) curve = Math.sin(((section - 255) / 55) * Math.PI) * 1.7
+    if (i < 35 || i > SEGMENT_COUNT - 45) curve = 0
+
+    const hillTarget =
+      Math.sin(i * 0.017) * 520 +
+      Math.sin(i * 0.0065) * 920 +
+      (i > 820 && i < 1030 ? Math.sin(((i - 820) / 210) * Math.PI) * 1100 : 0)
+    elevation = approach(elevation, hillTarget, 34)
+
+    segments.push({ index: i, z: i * SEGMENT_LENGTH, y: elevation, curve })
   }
-  return segs
+  return segments
 }
 
-function project(p: Projected, camX: number, camY: number, camZ: number) {
-  const cameraX = p.wx - camX
-  const cameraY = p.wy - camY
-  const cameraZ = p.wz - camZ
-  p.scale = CAMERA_DEPTH / cameraZ
-  p.sx = Math.round(WIDTH / 2 + (p.scale * cameraX * WIDTH) / 2)
-  p.sy = Math.round(HEIGHT / 2 - (p.scale * cameraY * HEIGHT) / 2)
-  p.sw = Math.round((p.scale * ROAD_WIDTH * WIDTH) / 2)
-}
-
-function poly(
-  ctx: CanvasRenderingContext2D,
-  x1: number,
-  y1: number,
-  w1: number,
-  x2: number,
-  y2: number,
-  w2: number,
-  color: string,
-) {
-  ctx.fillStyle = color
-  ctx.beginPath()
-  ctx.moveTo(x1 - w1, y1)
-  ctx.lineTo(x1 + w1, y1)
-  ctx.lineTo(x2 + w2, y2)
-  ctx.lineTo(x2 - w2, y2)
-  ctx.closePath()
-  ctx.fill()
-}
-
-export default function RoadRashGame() {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [phase, setPhase] = useState<GamePhase>("menu")
-  const [hud, setHud] = useState<Hud>({
-    speed: 0,
+function makeSimulation(): Simulation {
+  const rivals: Rider[] = RIVAL_DATA.map(([name, color], index) => ({
+    name,
+    color,
+    z: 3_100 + index * 1_050,
+    lane: [-0.62, 0.48, -0.08, 0.7, -0.74][index],
+    speed: MAX_SPEED * (0.7 + index * 0.023),
+    targetSpeed: MAX_SPEED * (0.78 + index * 0.025),
     health: 100,
-    progress: 0,
-    rank: 6,
-    total: 6,
-    rivalsLeft: 5,
-    message: "",
-  })
+    weave: index * 1.7,
+    attackCooldown: 1 + index * 0.3,
+    hitTimer: 0,
+    crashed: 0,
+  }))
 
-  // Mutable game state kept in refs (avoids re-render churn)
-  const phaseRef = useRef<GamePhase>("menu")
-  const segsRef = useRef<Segment[]>([])
-  const keys = useRef<Record<string, boolean>>({})
-  const attackRef = useRef(false)
+  const traffic: Traffic[] = Array.from({ length: 34 }, (_, index) => ({
+    z: 10_000 + index * 7_900 + (index % 4) * 850,
+    lane: [-0.67, 0.02, 0.65, -0.22][index % 4],
+    speed: MAX_SPEED * (0.3 + (index % 5) * 0.035),
+    color: ["#d8dee9", "#d1495b", "#277da1", "#f4a261", "#7f8c8d"][index % 5],
+    type: index % 6 === 0 ? "van" : "car",
+  }))
 
-  const state = useRef({
+  return {
     position: 0,
     playerX: 0,
     speed: 0,
     health: 100,
-    punchTimer: 0,
-    steerLean: 0,
-    hitFlash: 0,
-    crashTimer: 0,
-    rivals: [] as Rival[],
-    cars: [] as Car[],
-    finished: false,
-  })
-
-  const resetGame = useCallback(() => {
-    segsRef.current = buildTrack()
-    const rivals: Rival[] = RIVAL_NAMES.map((name, i) => ({
-      name,
-      z: (i + 1) * 900 + 1600,
-      offset: (i % 3) * 0.5 - 0.5,
-      speed: MAX_SPEED * (0.72 + i * 0.015),
-      health: 100,
-      down: false,
-      hitFlash: 0,
-      swingCooldown: Math.random() * 2,
-      color: ["#e8493b", "#3ba0e8", "#e8c84a", "#8be83b", "#e83bc8"][i],
-    }))
-    const cars: Car[] = []
-    for (let i = 0; i < 26; i++) {
-      cars.push({
-        z: 3000 + i * (TRACK_LENGTH / 30) + Math.random() * 1200,
-        offset: Math.random() * 1.6 - 0.8,
-        speed: MAX_SPEED * (0.25 + Math.random() * 0.25),
-        color: ["#c9ccd4", "#5a6070", "#c98a3b", "#7d8896"][i % 4],
-      })
-    }
-    state.current = {
-      position: 0,
-      playerX: 0,
-      speed: 0,
-      health: 100,
-      punchTimer: 0,
-      steerLean: 0,
-      hitFlash: 0,
-      crashTimer: 0,
-      rivals,
-      cars,
-      finished: false,
-    }
-  }, [])
-
-  const startGame = useCallback(() => {
-    resetGame()
-    phaseRef.current = "playing"
-    setPhase("playing")
-  }, [resetGame])
-
-  // Input
-  useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase()
-      if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k)) {
-        e.preventDefault()
-      }
-      keys.current[k] = true
-      if (k === " " || k === "j" || k === "f") attackRef.current = true
-    }
-    const up = (e: KeyboardEvent) => {
-      keys.current[e.key.toLowerCase()] = false
-    }
-    window.addEventListener("keydown", down)
-    window.addEventListener("keyup", up)
-    return () => {
-      window.removeEventListener("keydown", down)
-      window.removeEventListener("keyup", up)
-    }
-  }, [])
-
-  // Main loop
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
-
-    // Build track immediately so the road renders behind the menu
-    if (segsRef.current.length === 0) segsRef.current = buildTrack()
-
-    let raf = 0
-    let last = performance.now()
-    let hudTimer = 0
-
-    const findSeg = (z: number) =>
-      segsRef.current[Math.floor(z / SEGMENT_LENGTH) % N_SEGMENTS]
-
-    const update = (dt: number) => {
-      const s = state.current
-      if (phaseRef.current !== "playing") return
-      const segs = segsRef.current
-      const playerSeg = findSeg(s.position + CAMERA_HEIGHT)
-      const speedPct = s.speed / MAX_SPEED
-      const dx = dt * 2.2 * speedPct
-
-      // Steering
-      const left = keys.current["arrowleft"] || keys.current["a"]
-      const right = keys.current["arrowright"] || keys.current["d"]
-      const up = keys.current["arrowup"] || keys.current["w"]
-      const dn = keys.current["arrowdown"] || keys.current["s"]
-
-      s.steerLean *= 0.85
-      if (left) {
-        s.playerX -= dx
-        s.steerLean = Math.max(-1, s.steerLean - 0.15)
-      }
-      if (right) {
-        s.playerX += dx
-        s.steerLean = Math.min(1, s.steerLean + 0.15)
-      }
-
-      // Centrifugal push through curves
-      s.playerX -= dx * speedPct * playerSeg.curve * CENTRIFUGAL
-
-      // Acceleration
-      if (s.crashTimer > 0) {
-        s.crashTimer -= dt
-        s.speed += DECEL * 1.5 * dt
-      } else if (up) {
-        s.speed += ACCEL * dt
-      } else if (dn) {
-        s.speed += BRAKING * dt
-      } else {
-        s.speed += DECEL * dt
-      }
-
-      // Off-road
-      if ((s.playerX < -1 || s.playerX > 1) && s.speed > OFF_ROAD_LIMIT) {
-        s.speed += OFF_ROAD_DECEL * dt
-      }
-
-      s.speed = Math.max(0, Math.min(s.speed, MAX_SPEED))
-      s.playerX = Math.max(-2, Math.min(2, s.playerX))
-      s.position += s.speed * dt
-      if (s.position >= TRACK_LENGTH) s.position -= TRACK_LENGTH
-
-      // Punch
-      let punchLanded = false
-      if (attackRef.current && s.punchTimer <= 0) {
-        s.punchTimer = 0.35
-        punchLanded = true // one solid hit per press
-      }
-      attackRef.current = false
-      if (s.punchTimer > 0) s.punchTimer -= dt
-      if (s.hitFlash > 0) s.hitFlash -= dt
-
-      const playerZ = s.position
-
-      // Rivals
-      let rivalsAhead = 0
-      let rivalsLeft = 0
-      for (const r of s.rivals) {
-        if (r.hitFlash > 0) r.hitFlash -= dt
-        if (r.swingCooldown > 0) r.swingCooldown -= dt
-
-        if (r.down) {
-          r.speed += DECEL * dt
-          r.speed = Math.max(0, r.speed)
-        } else {
-          rivalsLeft++
-          // AI: follow the road, wander a little
-          const rSeg = findSeg(r.z + CAMERA_HEIGHT)
-          r.offset -= dt * (r.speed / MAX_SPEED) * rSeg.curve * CENTRIFUGAL * 0.5
-          r.offset += Math.sin(r.z * 0.001) * 0.004
-          r.offset = Math.max(-0.9, Math.min(0.9, r.offset))
-        }
-        r.z += r.speed * dt
-        if (r.z >= TRACK_LENGTH) r.z -= TRACK_LENGTH
-
-        let dz = r.z - playerZ
-        if (dz > TRACK_LENGTH / 2) dz -= TRACK_LENGTH
-        if (dz < -TRACK_LENGTH / 2) dz += TRACK_LENGTH
-        if (dz > 0) rivalsAhead++
-
-        const near = Math.abs(dz) < 340 && Math.abs(r.offset - s.playerX) < 1.05
-        if (near && !r.down) {
-          // Player punches rival (one solid hit per press)
-          if (punchLanded) {
-            r.health -= 25
-            r.hitFlash = 0.3
-            // knock rival sideways
-            r.offset += (r.offset >= s.playerX ? 1 : -1) * 0.12
-            if (r.health <= 0) {
-              r.health = 0
-              r.down = true
-              r.speed = MAX_SPEED * 0.15
-            }
-          }
-          // Rival swings back
-          if (r.swingCooldown <= 0) {
-            s.health -= 9
-            s.hitFlash = 0.3
-            s.playerX += (s.playerX >= r.offset ? 1 : -1) * 0.15
-            r.swingCooldown = 1.1
-          }
-        }
-
-        // Physical bump when overlapping tightly
-        if (Math.abs(dz) < 140 && Math.abs(r.offset - s.playerX) < 0.55 && !r.down) {
-          s.speed *= 0.985
-          if (s.speed > r.speed) {
-            s.health -= 6 * dt
-          }
-        }
-      }
-
-      // Traffic
-      for (const c of s.cars) {
-        c.z += c.speed * dt
-        if (c.z >= TRACK_LENGTH) {
-          c.z -= TRACK_LENGTH
-          c.offset = Math.random() * 1.6 - 0.8
-        }
-        let dz = c.z - playerZ
-        if (dz > TRACK_LENGTH / 2) dz -= TRACK_LENGTH
-        if (dz < -TRACK_LENGTH / 2) dz += TRACK_LENGTH
-        if (Math.abs(dz) < 180 && Math.abs(c.offset - s.playerX) < 0.55) {
-          if (s.crashTimer <= 0) {
-            s.health -= 16
-            s.hitFlash = 0.4
-          }
-          s.crashTimer = 0.5
-          s.speed *= 0.35
-        }
-      }
-
-      // Health / win / lose
-      s.health = Math.max(0, s.health)
-      if (s.health <= 0) {
-        phaseRef.current = "busted"
-        setPhase("busted")
-      }
-      if (playerZ >= FINISH && !s.finished) {
-        s.finished = true
-        phaseRef.current = "won"
-        setPhase("won")
-      }
-
-      // HUD (throttled)
-      hudTimer -= dt
-      if (hudTimer <= 0) {
-        hudTimer = 0.1
-        setHud({
-          speed: Math.round((s.speed / MAX_SPEED) * 199),
-          health: Math.round(s.health),
-          progress: Math.min(100, Math.round((playerZ / FINISH) * 100)),
-          rank: rivalsAhead + 1,
-          total: s.rivals.length + 1,
-          rivalsLeft,
-          message: "",
-        })
-      }
-    }
-
-    const drawSprite = (
-      screenX: number,
-      screenY: number,
-      scale: number,
-      kind: "rivalBike" | "car",
-      color: string,
-      flash: boolean,
-      down: boolean,
-    ) => {
-      const w = scale * WIDTH * (kind === "car" ? 1.9 : 1.3)
-      const h = w * (kind === "car" ? 0.75 : 1.15)
-      const x = screenX - w / 2
-      const y = screenY - h
-
-      ctx.save()
-      if (down) ctx.globalAlpha = 0.55
-      // shadow
-      ctx.fillStyle = "rgba(0,0,0,0.35)"
-      ctx.beginPath()
-      ctx.ellipse(screenX, screenY, w * 0.5, h * 0.09, 0, 0, Math.PI * 2)
-      ctx.fill()
-
-      if (kind === "car") {
-        ctx.fillStyle = color
-        rr(ctx, x + w * 0.08, y + h * 0.35, w * 0.84, h * 0.55, w * 0.06)
-        ctx.fillStyle = "#141821"
-        rr(ctx, x + w * 0.2, y + h * 0.12, w * 0.6, h * 0.4, w * 0.05)
-        ctx.fillStyle = "#e2404a"
-        rr(ctx, x + w * 0.1, y + h * 0.78, w * 0.16, h * 0.12, w * 0.02)
-        rr(ctx, x + w * 0.74, y + h * 0.78, w * 0.16, h * 0.12, w * 0.02)
-      } else {
-        // rear-view motorbike + rider
-        // wheels
-        ctx.fillStyle = "#0d0d12"
-        ctx.beginPath()
-        ctx.ellipse(screenX, y + h * 0.9, w * 0.26, h * 0.12, 0, 0, Math.PI * 2)
-        ctx.fill()
-        // body
-        ctx.fillStyle = color
-        rr(ctx, x + w * 0.3, y + h * 0.5, w * 0.4, h * 0.35, w * 0.08)
-        // rider torso
-        ctx.fillStyle = flash ? "#ffffff" : "#20242e"
-        rr(ctx, x + w * 0.32, y + h * 0.12, w * 0.36, h * 0.46, w * 0.1)
-        // helmet
-        ctx.fillStyle = flash ? "#ffffff" : color
-        ctx.beginPath()
-        ctx.arc(screenX, y + h * 0.12, w * 0.15, 0, Math.PI * 2)
-        ctx.fill()
-      }
-      ctx.restore()
-    }
-
-    const render = () => {
-      const s = state.current
-      const segs = segsRef.current
-      if (segs.length === 0) {
-        return
-      }
-
-      // Sky gradient
-      const sky = ctx.createLinearGradient(0, 0, 0, HEIGHT * 0.6)
-      sky.addColorStop(0, COLORS.sky)
-      sky.addColorStop(1, COLORS.skyGlow)
-      ctx.fillStyle = sky
-      ctx.fillRect(0, 0, WIDTH, HEIGHT)
-
-      // Sun
-      ctx.fillStyle = "rgba(255,180,90,0.9)"
-      ctx.beginPath()
-      ctx.arc(WIDTH / 2, HEIGHT * 0.42, 90, 0, Math.PI * 2)
-      ctx.fill()
-
-      const baseIndex = Math.floor(s.position / SEGMENT_LENGTH) % N_SEGMENTS
-      const basePercent = (s.position % SEGMENT_LENGTH) / SEGMENT_LENGTH
-      const playerSeg = segs[baseIndex]
-      const playerY =
-        playerSeg.y + (segs[(baseIndex + 1) % N_SEGMENTS].y - playerSeg.y) * basePercent
-
-      let x = 0
-      let dxAcc = 0
-      let maxY = HEIGHT
-      const drawn: Record<number, { sx: number; sy: number; scale: number; clip: number }> = {}
-
-      for (let n = 0; n < DRAW_DISTANCE; n++) {
-        const idx = (baseIndex + n) % N_SEGMENTS
-        if (baseIndex + n >= N_SEGMENTS) break // finite track, don't wrap visually
-        const seg = segs[idx]
-        const looped = false
-        const camZ = s.position - (looped ? TRACK_LENGTH : 0)
-
-        seg.p1.wx = 0
-        seg.p1.wy = seg.y
-        seg.p1.wz = seg.z
-        seg.p2.wx = 0
-        seg.p2.wy = segs[(idx + 1) % N_SEGMENTS].y
-        seg.p2.wz = seg.z + SEGMENT_LENGTH
-
-        project(seg.p1, s.playerX * ROAD_WIDTH - x, playerY + CAMERA_HEIGHT, camZ)
-        project(seg.p2, s.playerX * ROAD_WIDTH - x - dxAcc, playerY + CAMERA_HEIGHT, camZ)
-
-        x += dxAcc
-        dxAcc += seg.curve
-
-        if (seg.p1.wz - camZ < CAMERA_DEPTH || seg.p2.sy >= maxY || seg.p2.sy >= seg.p1.sy) {
-          continue
-        }
-
-        const light = seg.colorIndex === 0
-        const grass = light ? COLORS.grassLight : COLORS.grassDark
-        const rumble = light ? COLORS.rumbleLight : COLORS.rumbleDark
-        const road = light ? COLORS.roadLight : COLORS.roadDark
-
-        // grass fills whole band
-        ctx.fillStyle = grass
-        ctx.fillRect(0, seg.p2.sy, WIDTH, seg.p1.sy - seg.p2.sy)
-
-        // rumble strips
-        const r1 = seg.p1.sw * 1.15
-        const r2 = seg.p2.sw * 1.15
-        poly(ctx, seg.p1.sx, seg.p1.sy, r1, seg.p2.sx, seg.p2.sy, r2, rumble)
-        // road
-        poly(ctx, seg.p1.sx, seg.p1.sy, seg.p1.sw, seg.p2.sx, seg.p2.sy, seg.p2.sw, road)
-        // lane markers
-        if (light) {
-          const lw1 = (seg.p1.sw / (LANES * 2)) * 0.35
-          const lw2 = (seg.p2.sw / (LANES * 2)) * 0.35
-          for (let l = 1; l < LANES; l++) {
-            const lx1 = seg.p1.sx - seg.p1.sw + (seg.p1.sw * 2 * l) / LANES
-            const lx2 = seg.p2.sx - seg.p2.sw + (seg.p2.sw * 2 * l) / LANES
-            poly(ctx, lx1, seg.p1.sy, lw1, lx2, seg.p2.sy, lw2, COLORS.lane)
-          }
-        }
-
-        drawn[idx] = { sx: seg.p1.sx, sy: seg.p1.sy, scale: seg.p1.scale, clip: maxY }
-        maxY = seg.p2.sy
-      }
-
-      // Sprites: draw far -> near
-      type SpriteDraw = { z: number; screenX: number; screenY: number; scale: number; car: boolean; color: string; flash: boolean; down: boolean }
-      const sprites: SpriteDraw[] = []
-      const collect = (z: number, offset: number, car: boolean, color: string, flash: boolean, down: boolean) => {
-        const idx = Math.floor(z / SEGMENT_LENGTH) % N_SEGMENTS
-        const d = drawn[idx]
-        if (!d) return
-        const screenX = d.sx + (d.scale * offset * ROAD_WIDTH * WIDTH) / 2
-        const screenY = d.sy
-        if (screenY > d.clip) return
-        sprites.push({ z, screenX, screenY, scale: d.scale, car, color, flash, down })
-      }
-      for (const c of s.cars) collect(c.z, c.offset, true, c.color, false, false)
-      for (const r of s.rivals) collect(r.z, r.offset, false, r.color, r.hitFlash > 0, r.down)
-      sprites.sort((a, b) => b.z - a.z)
-      for (const sp of sprites) {
-        drawSprite(sp.screenX, sp.screenY, sp.scale, sp.car ? "car" : "rivalBike", sp.color, sp.flash, sp.down)
-      }
-
-      // Player bike (bottom center)
-      drawPlayer(ctx, s)
-
-      // Hit flash overlay
-      if (s.hitFlash > 0) {
-        ctx.fillStyle = `rgba(220,40,50,${s.hitFlash * 0.5})`
-        ctx.fillRect(0, 0, WIDTH, HEIGHT)
-      }
-    }
-
-    const loop = (t: number) => {
-      let dt = (t - last) / 1000
-      last = t
-      if (dt > 0.05) dt = 0.05
-      update(dt)
-      render()
-      raf = requestAnimationFrame(loop)
-    }
-    raf = requestAnimationFrame(loop)
-    return () => cancelAnimationFrame(raf)
-  }, [])
-
-  return (
-    <div className="relative w-full max-w-4xl">
-      <div className="relative overflow-hidden rounded-xl border border-border bg-black shadow-2xl">
-        <canvas
-          ref={canvasRef}
-          width={WIDTH}
-          height={HEIGHT}
-          className="block w-full"
-          style={{ imageRendering: "auto", aspectRatio: `${WIDTH} / ${HEIGHT}` }}
-        />
-
-        {/* HUD */}
-        {phase === "playing" && <HudOverlay hud={hud} punch={() => (attackRef.current = true)} keys={keys} />}
-
-        {/* Menu / results */}
-        {phase !== "playing" && (
-          <Overlay phase={phase} hud={hud} onStart={startGame} />
-        )}
-      </div>
-      <ControlsLegend />
-    </div>
-  )
+    nitro: 100,
+    lean: 0,
+    attack: 0,
+    attackSide: 1,
+    hit: 0,
+    shake: 0,
+    countdown: 3.65,
+    raceTime: 0,
+    message: "GET READY",
+    messageTimer: 1,
+    rivals,
+    traffic,
+    particles: [],
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers & sub-components
-// ---------------------------------------------------------------------------
-function rr(
+function quad(
+  ctx: CanvasRenderingContext2D,
+  nearX: number,
+  nearY: number,
+  nearW: number,
+  farX: number,
+  farY: number,
+  farW: number,
+  color: string,
+) {
+  ctx.fillStyle = color
+  ctx.beginPath()
+  ctx.moveTo(nearX - nearW, nearY)
+  ctx.lineTo(nearX + nearW, nearY)
+  ctx.lineTo(farX + farW, farY)
+  ctx.lineTo(farX - farW, farY)
+  ctx.closePath()
+  ctx.fill()
+}
+
+function roundedRect(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   w: number,
   h: number,
-  r: number,
+  radius: number,
 ) {
   ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.arcTo(x + w, y, x + w, y + h, r)
-  ctx.arcTo(x + w, y + h, x, y + h, r)
-  ctx.arcTo(x, y + h, x, y, r)
-  ctx.arcTo(x, y, x + w, y, r)
-  ctx.closePath()
+  ctx.roundRect(x, y, w, h, radius)
   ctx.fill()
 }
 
-function drawPlayer(ctx: CanvasRenderingContext2D, s: { steerLean: number; punchTimer: number }) {
-  const cx = WIDTH / 2 + s.steerLean * 26
-  const baseY = HEIGHT - 40
-  const w = 150
-  const h = 170
-
-  ctx.save()
-  // shadow
-  ctx.fillStyle = "rgba(0,0,0,0.4)"
-  ctx.beginPath()
-  ctx.ellipse(WIDTH / 2, baseY + 6, 90, 14, 0, 0, Math.PI * 2)
-  ctx.fill()
-
-  const x = cx - w / 2
-  const y = baseY - h
-
-  // rear wheel
-  ctx.fillStyle = "#0c0c11"
-  ctx.beginPath()
-  ctx.ellipse(cx, baseY - 6, 46, 20, 0, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.fillStyle = "#2a2d38"
-  ctx.beginPath()
-  ctx.ellipse(cx, baseY - 6, 22, 9, 0, 0, Math.PI * 2)
-  ctx.fill()
-
-  // bike body
-  ctx.fillStyle = "#c8342c"
-  rr(ctx, x + w * 0.28, y + h * 0.5, w * 0.44, h * 0.32, 16)
-  ctx.fillStyle = "#e0e2e8"
-  rr(ctx, x + w * 0.3, y + h * 0.58, w * 0.4, h * 0.1, 8)
-
-  // rider
-  ctx.fillStyle = "#20242e"
-  rr(ctx, x + w * 0.3, y + h * 0.14, w * 0.4, h * 0.48, 18)
-  // jacket accent
-  ctx.fillStyle = "#c8342c"
-  rr(ctx, x + w * 0.36, y + h * 0.2, w * 0.28, h * 0.16, 10)
-
-  // arms (extend on punch)
-  ctx.strokeStyle = "#20242e"
-  ctx.lineWidth = 18
-  ctx.lineCap = "round"
-  const punching = s.punchTimer > 0
-  const armX = punching ? w * 0.62 : w * 0.5
-  ctx.beginPath()
-  ctx.moveTo(x + w * 0.34, y + h * 0.34)
-  ctx.lineTo(x + w * (punching ? 0.86 : 0.28), y + h * (punching ? 0.28 : 0.5))
-  ctx.stroke()
-  ctx.beginPath()
-  ctx.moveTo(x + w * 0.66, y + h * 0.34)
-  ctx.lineTo(x + w * (punching ? 0.14 : 0.72), y + h * (punching ? 0.28 : 0.5))
-  ctx.stroke()
-
-  // fist / impact
-  if (punching) {
-    ctx.fillStyle = "#f2c14e"
-    ctx.beginPath()
-    ctx.arc(x + w * 0.9, y + h * 0.26, 16, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.fillStyle = "#fff"
-    ctx.font = "bold 26px system-ui"
-    ctx.fillText("POW!", x + w * 0.95, y + h * 0.2)
-  }
-
-  // helmet
-  ctx.fillStyle = "#c8342c"
-  ctx.beginPath()
-  ctx.arc(cx, y + h * 0.12, 26, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.fillStyle = "#12141b"
-  rr(ctx, cx - 20, y + h * 0.08, 40, 14, 6)
-  ctx.restore()
+function ordinal(value: number) {
+  if (value === 1) return "1ST"
+  if (value === 2) return "2ND"
+  if (value === 3) return "3RD"
+  return `${value}TH`
 }
 
-function HudOverlay({
-  hud,
-  punch,
-  keys,
-}: {
-  hud: Hud
-  punch: () => void
-  keys: React.MutableRefObject<Record<string, boolean>>
-}) {
-  const hold = (k: string, v: boolean) => () => (keys.current[k] = v)
+export default function RoadRashGame() {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const keysRef = useRef<Keys>({})
+  const phaseRef = useRef<Phase>("menu")
+  const trackRef = useRef<TrackSegment[]>(buildTrack())
+  const simRef = useRef<Simulation>(makeSimulation())
+  const attackQueuedRef = useRef(false)
+  const [phase, setPhase] = useState<Phase>("menu")
+  const [hud, setHud] = useState<Hud>({
+    speed: 0,
+    health: 100,
+    progress: 0,
+    rank: 6,
+    countdown: 3,
+    message: "",
+    rival: "",
+    rivalHealth: 100,
+    nitro: 100,
+  })
+
+  const changePhase = useCallback((next: Phase) => {
+    phaseRef.current = next
+    setPhase(next)
+  }, [])
+
+  const startRace = useCallback(() => {
+    simRef.current = makeSimulation()
+    attackQueuedRef.current = false
+    changePhase("countdown")
+  }, [changePhase])
+
+  useEffect(() => {
+    const onDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      if (["arrowup", "arrowdown", "arrowleft", "arrowright", " ", "shift"].includes(key)) {
+        event.preventDefault()
+      }
+      keysRef.current[key] = true
+      if (key === " " || key === "j" || key === "f") attackQueuedRef.current = true
+      if ((key === "enter" || key === " ") && phaseRef.current !== "racing" && phaseRef.current !== "countdown") {
+        startRace()
+      }
+    }
+    const onUp = (event: KeyboardEvent) => {
+      keysRef.current[event.key.toLowerCase()] = false
+    }
+    const onBlur = () => {
+      keysRef.current = {}
+    }
+    window.addEventListener("keydown", onDown, { passive: false })
+    window.addEventListener("keyup", onUp)
+    window.addEventListener("blur", onBlur)
+    return () => {
+      window.removeEventListener("keydown", onDown)
+      window.removeEventListener("keyup", onUp)
+      window.removeEventListener("blur", onBlur)
+    }
+  }, [startRace])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!canvas || !ctx) return
+
+    const track = trackRef.current
+    const screen: ScreenPoint[] = Array.from({ length: DRAW_DISTANCE + 2 }, () => ({
+      x: 0,
+      y: 0,
+      road: 0,
+      scale: 0,
+      visible: false,
+    }))
+    let frame = 0
+    let previous = performance.now()
+    let hudClock = 0
+
+    const setMessage = (sim: Simulation, message: string, seconds = 1.1) => {
+      sim.message = message
+      sim.messageTimer = seconds
+    }
+
+    const burst = (sim: Simulation, x: number, y: number, color: string, amount = 10) => {
+      for (let i = 0; i < amount; i++) {
+        sim.particles.push({
+          x,
+          y,
+          vx: (Math.random() - 0.5) * 360,
+          vy: -70 - Math.random() * 250,
+          life: 0.35 + Math.random() * 0.35,
+          color,
+        })
+      }
+    }
+
+    const relativeScreen = (z: number, lane: number) => {
+      const baseIndex = Math.floor(simRef.current.position / SEGMENT_LENGTH)
+      const relative = z / SEGMENT_LENGTH - baseIndex
+      const index = Math.floor(relative)
+      if (index < 1 || index >= DRAW_DISTANCE - 1) return null
+      const a = screen[index]
+      const b = screen[index + 1]
+      if (!a?.visible || !b?.visible) return null
+      const t = relative - index
+      const center = a.x + (b.x - a.x) * t
+      const y = a.y + (b.y - a.y) * t
+      const road = a.road + (b.road - a.road) * t
+      return { x: center + road * lane, y, road, scale: a.scale + (b.scale - a.scale) * t }
+    }
+
+    const attack = (sim: Simulation) => {
+      if (sim.attack > 0) return
+      let target: Rider | undefined
+      let best = Number.POSITIVE_INFINITY
+      for (const rival of sim.rivals) {
+        if (rival.crashed > 0) continue
+        const dz = rival.z - sim.position
+        const laneGap = Math.abs(rival.lane - sim.playerX)
+        const score = Math.abs(dz - PLAYER_Z) + laneGap * 900
+        if (Math.abs(dz - PLAYER_Z) < 680 && laneGap < 0.72 && score < best) {
+          target = rival
+          best = score
+        }
+      }
+      sim.attack = 0.38
+      if (!target) {
+        sim.attackSide = sim.playerX > 0 ? 1 : -1
+        return
+      }
+      sim.attackSide = target.lane >= sim.playerX ? 1 : -1
+      target.health = Math.max(0, target.health - 28)
+      target.hitTimer = 0.35
+      target.lane = clamp(target.lane + sim.attackSide * 0.16, -1.05, 1.05)
+      const point = relativeScreen(target.z, target.lane)
+      if (point) burst(sim, point.x, point.y - point.road * 0.18, "#ffe66d", 14)
+      if (target.health <= 0) {
+        target.crashed = 3.2
+        target.speed *= 0.18
+        setMessage(sim, `${target.name} WIPED OUT!`, 1.5)
+      } else {
+        setMessage(sim, "GOOD HIT!", 0.7)
+      }
+    }
+
+    const update = (dt: number) => {
+      const sim = simRef.current
+      const phaseNow = phaseRef.current
+      const keys = keysRef.current
+
+      if (sim.messageTimer > 0) sim.messageTimer -= dt
+      if (sim.attack > 0) sim.attack -= dt
+      if (sim.hit > 0) sim.hit -= dt
+      if (sim.shake > 0) sim.shake -= dt
+      for (const particle of sim.particles) {
+        particle.life -= dt
+        particle.x += particle.vx * dt
+        particle.y += particle.vy * dt
+        particle.vy += 620 * dt
+      }
+      sim.particles = sim.particles.filter((particle) => particle.life > 0)
+
+      if (phaseNow === "menu" || phaseNow === "finished" || phaseNow === "wrecked") return
+
+      if (phaseNow === "countdown") {
+        sim.countdown -= dt
+        sim.speed = approach(sim.speed, MAX_SPEED * 0.12, MAX_SPEED * dt * 0.08)
+        hudClock -= dt
+        if (hudClock <= 0) {
+          hudClock = 0.08
+          setHud((current) => ({
+            ...current,
+            speed: Math.round((sim.speed / MAX_SPEED) * 198),
+            countdown: Math.max(0, Math.ceil(sim.countdown)),
+            message: sim.messageTimer > 0 ? sim.message : "",
+          }))
+        }
+        if (sim.countdown <= 0) {
+          sim.countdown = 0
+          setMessage(sim, "RIDE!", 0.9)
+          changePhase("racing")
+        }
+        return
+      }
+
+      sim.raceTime += dt
+      const gas = keys.arrowup || keys.w
+      const brake = keys.arrowdown || keys.s
+      const left = keys.arrowleft || keys.a
+      const right = keys.arrowright || keys.d
+      const boosting = (keys.shift || keys.k) && sim.nitro > 0 && gas
+      const speedRatio = sim.speed / MAX_SPEED
+
+      if (gas) sim.speed += MAX_SPEED * 0.31 * dt
+      else sim.speed -= MAX_SPEED * 0.12 * dt
+      if (brake) sim.speed -= MAX_SPEED * 0.62 * dt
+      if (boosting) {
+        sim.speed += MAX_SPEED * 0.42 * dt
+        sim.nitro = Math.max(0, sim.nitro - 24 * dt)
+      } else {
+        sim.nitro = Math.min(100, sim.nitro + 4.5 * dt)
+      }
+
+      const baseIndex = clamp(Math.floor(sim.position / SEGMENT_LENGTH), 0, SEGMENT_COUNT - 1)
+      const currentCurve = track[baseIndex].curve
+      const steer = (right ? 1 : 0) - (left ? 1 : 0)
+      sim.playerX += steer * dt * (1.2 + speedRatio * 1.65)
+      sim.playerX -= currentCurve * 0.19 * speedRatio * dt
+      sim.lean = approach(sim.lean, steer, dt * 6)
+      if (!steer) sim.lean = approach(sim.lean, 0, dt * 4)
+
+      if (Math.abs(sim.playerX) > 0.98) {
+        sim.speed -= MAX_SPEED * 0.34 * dt
+        sim.shake = Math.max(sim.shake, 0.08)
+      }
+      sim.playerX = clamp(sim.playerX, -1.28, 1.28)
+      sim.speed = clamp(sim.speed, 0, boosting ? MAX_SPEED * 1.13 : MAX_SPEED)
+      sim.position += sim.speed * dt
+
+      if (attackQueuedRef.current) {
+        attackQueuedRef.current = false
+        attack(sim)
+      }
+
+      for (const rival of sim.rivals) {
+        if (rival.hitTimer > 0) rival.hitTimer -= dt
+        if (rival.attackCooldown > 0) rival.attackCooldown -= dt
+        if (rival.crashed > 0) {
+          rival.crashed -= dt
+          rival.speed = Math.max(0, rival.speed - MAX_SPEED * 0.45 * dt)
+          continue
+        }
+
+        const catchUp = rival.z < sim.position - 4_000 ? MAX_SPEED * 0.12 : 0
+        rival.speed = approach(rival.speed, rival.targetSpeed + catchUp, MAX_SPEED * 0.055 * dt)
+        rival.z += rival.speed * dt
+        rival.weave += dt * (0.8 + rival.speed / MAX_SPEED)
+        rival.lane += Math.sin(rival.weave) * dt * 0.075
+        rival.lane = clamp(rival.lane, -0.88, 0.88)
+
+        const dz = rival.z - sim.position - PLAYER_Z
+        const laneGap = Math.abs(rival.lane - sim.playerX)
+        if (Math.abs(dz) < 420 && laneGap < 0.48) {
+          sim.speed *= 1 - dt * 0.42
+          rival.speed *= 1 - dt * 0.18
+          sim.playerX += (sim.playerX <= rival.lane ? -1 : 1) * dt * 0.35
+        }
+        if (Math.abs(dz) < 600 && laneGap < 0.72 && rival.attackCooldown <= 0) {
+          sim.health = Math.max(0, sim.health - 11)
+          sim.hit = 0.35
+          sim.shake = 0.3
+          sim.playerX += (sim.playerX <= rival.lane ? -1 : 1) * 0.13
+          rival.attackCooldown = 1.6 + Math.random()
+          setMessage(sim, `${rival.name} HIT YOU`, 0.8)
+        }
+      }
+
+      for (const car of sim.traffic) {
+        car.z += car.speed * dt
+        const dz = car.z - sim.position - PLAYER_Z
+        if (dz < -6_000) {
+          car.z = sim.position + 42_000 + Math.random() * 35_000
+          car.lane = [-0.66, 0, 0.66][Math.floor(Math.random() * 3)]
+        }
+        if (Math.abs(dz) < 390 && Math.abs(car.lane - sim.playerX) < (car.type === "van" ? 0.5 : 0.43)) {
+          sim.health = Math.max(0, sim.health - 20)
+          sim.speed *= 0.38
+          sim.hit = 0.55
+          sim.shake = 0.6
+          sim.playerX += sim.playerX <= car.lane ? -0.22 : 0.22
+          car.z += 650
+          setMessage(sim, "TRAFFIC SLAM!", 1)
+          burst(sim, VIEW_W / 2, VIEW_H * 0.72, "#ff8c42", 18)
+        }
+      }
+
+      if (sim.health <= 0) {
+        sim.speed *= 0.25
+        changePhase("wrecked")
+      } else if (sim.position >= TRACK_LENGTH - DRAW_DISTANCE * SEGMENT_LENGTH) {
+        sim.position = TRACK_LENGTH - DRAW_DISTANCE * SEGMENT_LENGTH
+        changePhase("finished")
+      }
+
+      hudClock -= dt
+      if (hudClock <= 0) {
+        hudClock = 0.08
+        const sorted = [...sim.rivals].sort((a, b) => b.z - a.z)
+        const nearby = sorted.find(
+          (rival) => rival.crashed <= 0 && Math.abs(rival.z - sim.position - PLAYER_Z) < 4_600,
+        )
+        setHud({
+          speed: Math.round((sim.speed / MAX_SPEED) * 198),
+          health: Math.round(sim.health),
+          progress: Math.round(clamp(sim.position / (TRACK_LENGTH - DRAW_DISTANCE * SEGMENT_LENGTH), 0, 1) * 100),
+          rank: 1 + sim.rivals.filter((rival) => rival.z > sim.position + PLAYER_Z).length,
+          countdown: Math.ceil(sim.countdown),
+          message: sim.messageTimer > 0 ? sim.message : "",
+          rival: nearby?.name ?? "",
+          rivalHealth: nearby?.health ?? 100,
+          nitro: Math.round(sim.nitro),
+        })
+      }
+    }
+
+    const projectRoad = (sim: Simulation) => {
+      const base = clamp(Math.floor(sim.position / SEGMENT_LENGTH), 0, SEGMENT_COUNT - DRAW_DISTANCE - 2)
+      const baseY = track[base].y
+      let curveX = 0
+      let curveDx = 0
+
+      for (let n = 0; n <= DRAW_DISTANCE + 1; n++) {
+        const segment = track[base + n]
+        const dz = segment.z - sim.position
+        const point = screen[n]
+        if (dz <= CAMERA_DEPTH) {
+          point.visible = false
+          continue
+        }
+        const scale = CAMERA_DEPTH / dz
+        point.scale = scale
+        point.x = VIEW_W / 2 + scale * (-sim.playerX * ROAD_WIDTH - curveX) * VIEW_W / 2
+        point.y = VIEW_H / 2 - scale * (segment.y - baseY - CAMERA_HEIGHT) * VIEW_H / 2
+        point.road = scale * ROAD_WIDTH * VIEW_W / 2
+        point.visible = point.y > VIEW_H * 0.2 && point.y < VIEW_H * 1.15 && point.road > 0
+        curveX += curveDx
+        curveDx += segment.curve
+      }
+      return base
+    }
+
+    const drawBackdrop = (sim: Simulation, base: number) => {
+      const horizon = VIEW_H * 0.39
+      const sky = ctx.createLinearGradient(0, 0, 0, horizon + 120)
+      sky.addColorStop(0, "#071426")
+      sky.addColorStop(0.58, "#3b245c")
+      sky.addColorStop(1, "#ff8243")
+      ctx.fillStyle = sky
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H)
+
+      const sunX = VIEW_W * 0.76 - track[base].curve * 10
+      const glow = ctx.createRadialGradient(sunX, horizon - 58, 4, sunX, horizon - 58, 115)
+      glow.addColorStop(0, "rgba(255,246,180,.95)")
+      glow.addColorStop(0.36, "rgba(255,190,70,.85)")
+      glow.addColorStop(1, "rgba(255,110,45,0)")
+      ctx.fillStyle = glow
+      ctx.fillRect(sunX - 130, horizon - 190, 260, 260)
+      ctx.fillStyle = "#ffcf5c"
+      ctx.beginPath()
+      ctx.arc(sunX, horizon - 58, 46, 0, Math.PI * 2)
+      ctx.fill()
+
+      const parallax = (sim.position * 0.004 + sim.playerX * 120) % VIEW_W
+      ctx.fillStyle = "#151b36"
+      ctx.beginPath()
+      ctx.moveTo(0, horizon + 35)
+      for (let x = -80; x <= VIEW_W + 100; x += 80) {
+        const worldX = x - parallax * 0.2
+        const height = 45 + Math.sin((worldX + 120) * 0.014) * 35 + Math.sin(worldX * 0.031) * 18
+        ctx.lineTo(x, horizon - height)
+      }
+      ctx.lineTo(VIEW_W, horizon + 80)
+      ctx.lineTo(0, horizon + 80)
+      ctx.fill()
+
+      ctx.fillStyle = "#182d31"
+      ctx.beginPath()
+      ctx.moveTo(0, horizon + 52)
+      for (let x = -40; x <= VIEW_W + 60; x += 55) {
+        const height = 25 + Math.abs(Math.sin((x + parallax * 0.45) * 0.025)) * 40
+        ctx.lineTo(x, horizon - height)
+      }
+      ctx.lineTo(VIEW_W, horizon + 90)
+      ctx.lineTo(0, horizon + 90)
+      ctx.fill()
+    }
+
+    const drawRoad = (base: number) => {
+      for (let n = DRAW_DISTANCE - 1; n >= 1; n--) {
+        const near = screen[n]
+        const far = screen[n + 1]
+        if (!near.visible || !far.visible || far.y >= near.y) continue
+        const stripe = Math.floor((base + n) / 3) % 2 === 0
+        ctx.fillStyle = stripe ? "#21402d" : "#1b3827"
+        ctx.fillRect(0, far.y, VIEW_W, near.y - far.y + 1)
+
+        quad(ctx, near.x, near.y, near.road * 1.12, far.x, far.y, far.road * 1.12, stripe ? "#f4efe2" : "#db3a34")
+        quad(ctx, near.x, near.y, near.road, far.x, far.y, far.road, stripe ? "#3e414b" : "#353842")
+
+        if (stripe) {
+          for (let lane = 1; lane < LANES; lane++) {
+            const fraction = -1 + (lane * 2) / LANES
+            quad(
+              ctx,
+              near.x + near.road * fraction,
+              near.y,
+              Math.max(1, near.road * 0.012),
+              far.x + far.road * fraction,
+              far.y,
+              Math.max(0.5, far.road * 0.012),
+              "#f7d154",
+            )
+          }
+        }
+
+        if ((base + n) % 42 === 0 && near.road > 24) {
+          const side = (base + n) % 84 === 0 ? -1 : 1
+          drawRoadsideSign(near.x + side * near.road * 1.38, near.y, near.road * 0.12, side)
+        }
+      }
+    }
+
+    const drawRoadsideSign = (x: number, y: number, size: number, side: number) => {
+      const h = clamp(size * 1.35, 7, 110)
+      const w = h * 0.72
+      ctx.fillStyle = "#30251e"
+      ctx.fillRect(x - 2, y - h * 0.66, 4, h * 0.66)
+      ctx.fillStyle = side < 0 ? "#f94144" : "#f9c74f"
+      ctx.fillRect(x - w / 2, y - h, w, h * 0.45)
+      if (h > 38) {
+        ctx.fillStyle = "#10151f"
+        ctx.font = `900 ${Math.max(8, h * 0.16)}px Arial`
+        ctx.textAlign = "center"
+        ctx.fillText(side < 0 ? "RASH" : "GO!", x, y - h * 0.71)
+      }
+    }
+
+    const drawTraffic = (point: { x: number; y: number; road: number }, car: Traffic) => {
+      const width = clamp(point.road * (car.type === "van" ? 0.34 : 0.29), 5, car.type === "van" ? 190 : 165)
+      const height = width * (car.type === "van" ? 0.72 : 0.58)
+      const x = point.x - width / 2
+      const y = point.y - height
+      ctx.fillStyle = "rgba(0,0,0,.35)"
+      ctx.beginPath()
+      ctx.ellipse(point.x, point.y, width * 0.55, height * 0.09, 0, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = car.color
+      roundedRect(ctx, x, y + height * 0.28, width, height * 0.68, width * 0.08)
+      ctx.fillStyle = "#101827"
+      roundedRect(ctx, x + width * 0.16, y, width * 0.68, height * 0.52, width * 0.08)
+      ctx.fillStyle = "#8ecae6"
+      roundedRect(ctx, x + width * 0.22, y + height * 0.08, width * 0.56, height * 0.25, width * 0.035)
+      ctx.fillStyle = "#ff304f"
+      ctx.fillRect(x + width * 0.08, y + height * 0.72, width * 0.18, height * 0.12)
+      ctx.fillRect(x + width * 0.74, y + height * 0.72, width * 0.18, height * 0.12)
+    }
+
+    const drawRival = (point: { x: number; y: number; road: number }, rival: Rider) => {
+      const width = clamp(point.road * 0.25, 8, 132)
+      const height = width * 1.26
+      const x = point.x
+      const y = point.y
+      ctx.save()
+      if (rival.crashed > 0) {
+        ctx.translate(x, y)
+        ctx.rotate(1.12)
+        ctx.translate(-x, -y)
+      }
+      ctx.fillStyle = "rgba(0,0,0,.4)"
+      ctx.beginPath()
+      ctx.ellipse(x, y, width * 0.55, height * 0.075, 0, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = "#101116"
+      ctx.beginPath()
+      ctx.ellipse(x, y - height * 0.04, width * 0.25, height * 0.16, 0, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = rival.hitTimer > 0 ? "#ffffff" : rival.color
+      roundedRect(ctx, x - width * 0.27, y - height * 0.49, width * 0.54, height * 0.42, width * 0.1)
+      ctx.fillStyle = "#171b26"
+      roundedRect(ctx, x - width * 0.31, y - height * 0.83, width * 0.62, height * 0.4, width * 0.12)
+      ctx.fillStyle = rival.hitTimer > 0 ? "#fff" : rival.color
+      ctx.beginPath()
+      ctx.arc(x, y - height * 0.9, width * 0.21, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = "#090d15"
+      ctx.fillRect(x - width * 0.16, y - height * 0.93, width * 0.32, height * 0.09)
+      if (width > 32) {
+        ctx.font = `900 ${clamp(width * 0.13, 7, 14)}px Arial`
+        ctx.textAlign = "center"
+        ctx.fillStyle = "#fff"
+        ctx.fillText(rival.name, x, y - height * 1.19)
+        ctx.fillStyle = "rgba(0,0,0,.65)"
+        ctx.fillRect(x - width * 0.35, y - height * 1.12, width * 0.7, Math.max(3, width * 0.05))
+        ctx.fillStyle = rival.health > 40 ? "#7ae582" : "#ff4d6d"
+        ctx.fillRect(x - width * 0.35, y - height * 1.12, width * 0.7 * (rival.health / 100), Math.max(3, width * 0.05))
+      }
+      ctx.restore()
+    }
+
+    const drawPlayer = (sim: Simulation) => {
+      const cx = VIEW_W / 2 + sim.lean * 31
+      const bottom = VIEW_H + 7
+      const lean = sim.lean * 0.07
+      ctx.save()
+      ctx.translate(cx, bottom - 120)
+      ctx.rotate(lean)
+      ctx.translate(-cx, -(bottom - 120))
+      ctx.fillStyle = "rgba(0,0,0,.5)"
+      ctx.beginPath()
+      ctx.ellipse(cx, bottom - 10, 92, 17, 0, 0, Math.PI * 2)
+      ctx.fill()
+
+      ctx.fillStyle = "#0a0d12"
+      ctx.beginPath()
+      ctx.ellipse(cx, bottom - 34, 49, 30, 0, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = "#353c48"
+      ctx.beginPath()
+      ctx.ellipse(cx, bottom - 34, 24, 13, 0, 0, Math.PI * 2)
+      ctx.fill()
+
+      ctx.fillStyle = "#e63946"
+      roundedRect(ctx, cx - 55, bottom - 122, 110, 82, 21)
+      ctx.fillStyle = "#edf2f4"
+      roundedRect(ctx, cx - 39, bottom - 105, 78, 18, 8)
+      ctx.fillStyle = "#171d28"
+      roundedRect(ctx, cx - 48, bottom - 217, 96, 115, 27)
+      ctx.fillStyle = "#e63946"
+      roundedRect(ctx, cx - 35, bottom - 202, 70, 42, 16)
+
+      const punching = sim.attack > 0
+      const attackX = sim.attackSide * (punching ? 112 : 55)
+      ctx.strokeStyle = "#171d28"
+      ctx.lineWidth = 24
+      ctx.lineCap = "round"
+      ctx.beginPath()
+      ctx.moveTo(cx - 33, bottom - 181)
+      ctx.lineTo(cx - (punching && sim.attackSide < 0 ? 112 : 60), bottom - (punching ? 191 : 130))
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.moveTo(cx + 33, bottom - 181)
+      ctx.lineTo(cx + (punching && sim.attackSide > 0 ? 112 : 60), bottom - (punching ? 191 : 130))
+      ctx.stroke()
+      if (punching) {
+        ctx.fillStyle = "#ffd166"
+        ctx.beginPath()
+        ctx.arc(cx + attackX, bottom - 191, 15, 0, Math.PI * 2)
+        ctx.fill()
+      }
+
+      ctx.fillStyle = "#e63946"
+      ctx.beginPath()
+      ctx.arc(cx, bottom - 237, 34, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = "#070d17"
+      roundedRect(ctx, cx - 27, bottom - 244, 54, 18, 8)
+      ctx.restore()
+    }
+
+    const render = () => {
+      const sim = simRef.current
+      const shakeX = sim.shake > 0 ? (Math.random() - 0.5) * 18 * Math.min(1, sim.shake * 4) : 0
+      const shakeY = sim.shake > 0 ? (Math.random() - 0.5) * 10 * Math.min(1, sim.shake * 4) : 0
+      ctx.save()
+      ctx.translate(shakeX, shakeY)
+
+      const base = projectRoad(sim)
+      drawBackdrop(sim, base)
+      drawRoad(base)
+
+      const drawables: Array<{ z: number; kind: "rival" | "traffic"; point: { x: number; y: number; road: number }; entity: Rider | Traffic }> = []
+      for (const car of sim.traffic) {
+        const point = relativeScreen(car.z, car.lane)
+        if (point) drawables.push({ z: car.z, kind: "traffic", point, entity: car })
+      }
+      for (const rival of sim.rivals) {
+        const point = relativeScreen(rival.z, rival.lane)
+        if (point) drawables.push({ z: rival.z, kind: "rival", point, entity: rival })
+      }
+      drawables.sort((a, b) => b.z - a.z)
+      for (const item of drawables) {
+        if (item.kind === "traffic") drawTraffic(item.point, item.entity as Traffic)
+        else drawRival(item.point, item.entity as Rider)
+      }
+
+      drawPlayer(sim)
+      for (const particle of sim.particles) {
+        ctx.globalAlpha = clamp(particle.life * 2.5, 0, 1)
+        ctx.fillStyle = particle.color
+        ctx.fillRect(particle.x, particle.y, 5, 5)
+      }
+      ctx.globalAlpha = 1
+
+      if (sim.hit > 0) {
+        const flash = ctx.createRadialGradient(VIEW_W / 2, VIEW_H / 2, 80, VIEW_W / 2, VIEW_H / 2, VIEW_W * 0.7)
+        flash.addColorStop(0, "rgba(255,20,40,0)")
+        flash.addColorStop(1, `rgba(255,20,40,${sim.hit * 0.55})`)
+        ctx.fillStyle = flash
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H)
+      }
+      ctx.restore()
+    }
+
+    const loop = (now: number) => {
+      const dt = Math.min(0.045, (now - previous) / 1000)
+      previous = now
+      update(dt)
+      render()
+      frame = requestAnimationFrame(loop)
+    }
+    frame = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(frame)
+  }, [changePhase])
+
   return (
-    <>
-      {/* Top stats */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-3 font-mono text-sm">
-        <div className="rounded-md bg-black/55 px-3 py-2 text-amber-300 backdrop-blur-sm">
-          <div className="text-[10px] uppercase tracking-widest text-amber-200/70">Position</div>
-          <div className="text-2xl font-bold leading-none">
-            {hud.rank}
-            <span className="text-sm text-amber-200/60">/{hud.total}</span>
-          </div>
-        </div>
-
-        <div className="flex flex-col items-center gap-1 rounded-md bg-black/55 px-4 py-2 backdrop-blur-sm">
-          <div className="text-[10px] uppercase tracking-widest text-white/60">Race Progress</div>
-          <div className="h-2 w-40 overflow-hidden rounded-full bg-white/15">
-            <div className="h-full bg-amber-400" style={{ width: `${hud.progress}%` }} />
-          </div>
-          <div className="text-[10px] text-white/60">{hud.rivalsLeft} rivals riding</div>
-        </div>
-
-        <div className="rounded-md bg-black/55 px-3 py-2 text-right text-cyan-300 backdrop-blur-sm">
-          <div className="text-[10px] uppercase tracking-widest text-cyan-200/70">Speed</div>
-          <div className="text-2xl font-bold leading-none">
-            {hud.speed}
-            <span className="text-sm text-cyan-200/60"> mph</span>
-          </div>
-        </div>
+    <div className="rr-game" aria-label="Roadrash arcade motorcycle racing game">
+      <div className="rr-screen">
+        <canvas ref={canvasRef} width={VIEW_W} height={VIEW_H} />
+        {(phase === "racing" || phase === "countdown") && (
+          <GameHud hud={hud} phase={phase} keys={keysRef} queueAttack={() => (attackQueuedRef.current = true)} />
+        )}
+        {phase === "menu" && <MenuOverlay onStart={startRace} />}
+        {phase === "finished" && <ResultOverlay won rank={hud.rank} onStart={startRace} />}
+        {phase === "wrecked" && <ResultOverlay won={false} rank={hud.rank} onStart={startRace} />}
       </div>
-
-      {/* Health bar */}
-      <div className="pointer-events-none absolute bottom-3 left-3 w-48 font-mono">
-        <div className="mb-1 flex justify-between text-[10px] uppercase tracking-widest text-white/70">
-          <span>Health</span>
-          <span>{hud.health}%</span>
-        </div>
-        <div className="h-3 overflow-hidden rounded-full border border-white/20 bg-black/50">
-          <div
-            className="h-full transition-[width] duration-150"
-            style={{
-              width: `${hud.health}%`,
-              backgroundColor: hud.health > 50 ? "#4ade80" : hud.health > 25 ? "#facc15" : "#ef4444",
-            }}
-          />
-        </div>
+      <div className="rr-control-strip">
+        <span><kbd>WASD</kbd> / <kbd>ARROWS</kbd> RIDE</span>
+        <span><kbd>SPACE</kbd> PUNCH</span>
+        <span><kbd>SHIFT</kbd> NITRO</span>
       </div>
-
-      {/* Touch controls (mobile) */}
-      <div className="absolute inset-x-0 bottom-0 flex select-none items-end justify-between p-3 md:hidden">
-        <div className="flex gap-2">
-          <TouchBtn label="◀" on={hold("arrowleft", true)} off={hold("arrowleft", false)} />
-          <TouchBtn label="▶" on={hold("arrowright", true)} off={hold("arrowright", false)} />
-        </div>
-        <div className="flex items-end gap-2">
-          <TouchBtn label="PUNCH" wide onDown={punch} />
-          <TouchBtn label="BRAKE" on={hold("arrowdown", true)} off={hold("arrowdown", false)} />
-          <TouchBtn label="GAS" accent on={hold("arrowup", true)} off={hold("arrowup", false)} />
-        </div>
-      </div>
-    </>
+    </div>
   )
 }
 
-function TouchBtn({
+function GameHud({
+  hud,
+  phase,
+  keys,
+  queueAttack,
+}: {
+  hud: Hud
+  phase: Phase
+  keys: React.MutableRefObject<Keys>
+  queueAttack: () => void
+}) {
+  const hold = (key: string, active: boolean) => () => {
+    keys.current[key] = active
+  }
+  return (
+    <div className="rr-hud">
+      <div className="rr-rank">
+        <small>POSITION</small>
+        <strong>{ordinal(hud.rank)}</strong>
+      </div>
+      <div className="rr-racebar">
+        <span style={{ width: `${hud.progress}%` }} />
+        <i style={{ left: `${hud.progress}%` }}>▲</i>
+        <b>COAST RUN • {hud.progress}%</b>
+      </div>
+      <div className="rr-speed">
+        <strong>{hud.speed}</strong>
+        <small>MPH</small>
+      </div>
+      <div className="rr-health">
+        <label><span>RIDER</span><b>{hud.health}</b></label>
+        <div><i style={{ width: `${hud.health}%` }} /></div>
+        <label><span>NITRO</span><b>{hud.nitro}</b></label>
+        <div className="nitro"><i style={{ width: `${hud.nitro}%` }} /></div>
+      </div>
+      {hud.rival && (
+        <div className="rr-rival-health">
+          <label>{hud.rival}</label>
+          <div><i style={{ width: `${hud.rivalHealth}%` }} /></div>
+        </div>
+      )}
+      {hud.message && <div className="rr-callout">{hud.message}</div>}
+      {phase === "countdown" && <div className="rr-countdown">{hud.countdown || "GO!"}</div>}
+      <div className="rr-touch" aria-label="Touch controls">
+        <div>
+          <TouchControl label="◀" onDown={hold("arrowleft", true)} onUp={hold("arrowleft", false)} />
+          <TouchControl label="▶" onDown={hold("arrowright", true)} onUp={hold("arrowright", false)} />
+        </div>
+        <div>
+          <TouchControl label="HIT" onDown={queueAttack} />
+          <TouchControl label="N₂O" onDown={hold("shift", true)} onUp={hold("shift", false)} />
+          <TouchControl label="GAS" accent onDown={hold("arrowup", true)} onUp={hold("arrowup", false)} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TouchControl({
   label,
-  on,
-  off,
-  onDown,
   accent,
-  wide,
+  onDown,
+  onUp,
 }: {
   label: string
-  on?: () => void
-  off?: () => void
-  onDown?: () => void
   accent?: boolean
-  wide?: boolean
+  onDown: () => void
+  onUp?: () => void
 }) {
   return (
     <button
       type="button"
-      onPointerDown={(e) => {
-        e.preventDefault()
-        on?.()
-        onDown?.()
+      className={accent ? "accent" : ""}
+      onPointerDown={(event) => {
+        event.preventDefault()
+        onDown()
       }}
-      onPointerUp={(e) => {
-        e.preventDefault()
-        off?.()
+      onPointerUp={(event) => {
+        event.preventDefault()
+        onUp?.()
       }}
-      onPointerLeave={() => off?.()}
-      className={`pointer-events-auto flex ${wide ? "h-16 w-20" : "h-16 w-16"} items-center justify-center rounded-full border border-white/25 font-mono text-sm font-bold text-white backdrop-blur-sm active:scale-95 ${
-        accent ? "bg-amber-500/80" : "bg-black/55"
-      }`}
+      onPointerCancel={() => onUp?.()}
+      onPointerLeave={() => onUp?.()}
       aria-label={label}
     >
       {label}
@@ -840,80 +929,28 @@ function TouchBtn({
   )
 }
 
-function Overlay({
-  phase,
-  hud,
-  onStart,
-}: {
-  phase: GamePhase
-  hud: Hud
-  onStart: () => void
-}) {
-  const isMenu = phase === "menu"
-  const won = phase === "won"
+function MenuOverlay({ onStart }: { onStart: () => void }) {
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center gap-5 bg-black/70 px-6 text-center backdrop-blur-sm">
-      {isMenu ? (
-        <>
-          <h1 className="font-mono text-4xl font-black tracking-tight text-amber-400 md:text-6xl">
-            ROAD<span className="text-red-500">RASH</span>
-          </h1>
-          <p className="max-w-md text-pretty text-sm leading-relaxed text-white/70 md:text-base">
-            Outrun and out-brawl 5 rival racers to the finish line. Pull up alongside a rider and
-            throw punches to knock them off — but dodge traffic or you&apos;ll get busted.
-          </p>
-        </>
-      ) : (
-        <>
-          <h1
-            className={`font-mono text-4xl font-black tracking-tight md:text-6xl ${
-              won ? "text-amber-400" : "text-red-500"
-            }`}
-          >
-            {won ? "FINISH!" : "BUSTED!"}
-          </h1>
-          <p className="text-lg text-white/80">
-            {won ? (
-              <>
-                You placed{" "}
-                <span className="font-bold text-amber-400">
-                  #{hud.rank}
-                </span>{" "}
-                of {hud.total} racers.
-              </>
-            ) : (
-              "Your bike is totaled. The pack left you in the dust."
-            )}
-          </p>
-        </>
-      )}
-
-      <button
-        type="button"
-        onClick={onStart}
-        className="rounded-full bg-amber-500 px-8 py-3 font-mono text-base font-bold text-black transition-transform hover:scale-105 active:scale-95"
-      >
-        {isMenu ? "START RACE" : "RACE AGAIN"}
-      </button>
+    <div className="rr-overlay rr-menu">
+      <p className="rr-kicker">ARCADE MOTORCYCLE COMBAT</p>
+      <h2>ROAD<span>RASH</span></h2>
+      <p className="rr-menu-copy">Five riders. One finish line. No clean racing.</p>
+      <button type="button" onClick={onStart}>START RACE <span>↵</span></button>
+      <div className="rr-menu-tips">
+        <span>GET BESIDE A RIVAL</span>
+        <b>THEN HIT SPACE TO SWING</b>
+      </div>
     </div>
   )
 }
 
-function ControlsLegend() {
+function ResultOverlay({ won, rank, onStart }: { won: boolean; rank: number; onStart: () => void }) {
   return (
-    <div className="mt-3 flex flex-wrap items-center justify-center gap-x-5 gap-y-1 font-mono text-xs text-muted-foreground">
-      <span>
-        <kbd className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">↑</kbd> Gas
-      </span>
-      <span>
-        <kbd className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">↓</kbd> Brake
-      </span>
-      <span>
-        <kbd className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">← →</kbd> Steer
-      </span>
-      <span>
-        <kbd className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">Space</kbd> Punch
-      </span>
+    <div className="rr-overlay rr-results">
+      <p className="rr-kicker">{won ? "COAST RUN COMPLETE" : "YOUR RIDE IS OVER"}</p>
+      <h2>{won ? ordinal(rank) : "WRECKED"}</h2>
+      <p>{won ? (rank === 1 ? "You own this road." : "You finished. Now come back for first.") : "The pack leaves you in the dust."}</p>
+      <button type="button" onClick={onStart}>RACE AGAIN <span>↻</span></button>
     </div>
   )
 }

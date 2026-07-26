@@ -587,8 +587,11 @@ export default function RoadRashGame() {
           rival.speed *= 1 - dt * 0.18
           sim.playerX += (sim.playerX <= rival.lane ? -1 : 1) * dt * 0.35
         }
+        // Only a rival that's level with or ahead of you can land a punch —
+        // never one trailing behind (you can't even see it back there).
         if (
-          Math.abs(dz) < 340 &&
+          dz > -80 &&
+          dz < 340 &&
           laneGap < 0.5 &&
           rival.attackCooldown <= 0 &&
           sim.invulnerable <= 0
@@ -1221,26 +1224,6 @@ export default function RoadRashGame() {
         ctx.fillRect(particle.x, particle.y, 5, 5)
       }
       ctx.globalAlpha = 1
-
-      // Speed lines streaking past the camera — scale with velocity.
-      const speedRatio = sim.speed / MAX_SPEED
-      const boosting = Boolean((keysRef.current.shift || keysRef.current.k) && sim.nitro > 0 && speedRatio > 0.1)
-      if (speedRatio > 0.55 || boosting) {
-        const cx = VIEW_W / 2
-        const cy = VIEW_H * 0.46
-        const count = Math.floor((speedRatio - 0.4) * 26) + (boosting ? 22 : 0)
-        ctx.strokeStyle = boosting ? "rgba(180,240,255,.5)" : "rgba(255,255,255,.28)"
-        ctx.lineWidth = boosting ? 2.4 : 1.4
-        for (let i = 0; i < count; i++) {
-          const ang = (i * 137.5 + sim.raceTime * 40) * (Math.PI / 180)
-          const r0 = 120 + ((i * 53) % 260)
-          const len = 40 + speedRatio * 90 + (boosting ? 60 : 0)
-          ctx.beginPath()
-          ctx.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0 * 0.7)
-          ctx.lineTo(cx + Math.cos(ang) * (r0 + len), cy + Math.sin(ang) * (r0 + len) * 0.7)
-          ctx.stroke()
-        }
-      }
 
       if (sim.hit > 0) {
         const flash = ctx.createRadialGradient(VIEW_W / 2, VIEW_H / 2, 80, VIEW_W / 2, VIEW_H / 2, VIEW_W * 0.7)

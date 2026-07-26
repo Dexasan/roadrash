@@ -594,6 +594,32 @@ export default function RoadRashGame() {
           burst(sim, VIEW_W / 2 + sim.playerX * 40, VIEW_H * 0.7, "#ff5470", 12)
           setMessage(sim, `${rival.name} HIT YOU`, 0.8)
         }
+
+        // Rival-vs-rival brawling: when two riders run side by side, the one
+        // with a ready swing takes a shot at its neighbour.
+        if (rival.attackCooldown <= 0) {
+          for (const other of sim.rivals) {
+            if (other === rival || other.crashed > 0) continue
+            const rivalGap = other.z - rival.z
+            if (Math.abs(rivalGap) < 340 && Math.abs(other.lane - rival.lane) < 0.4) {
+              other.health = Math.max(0, other.health - 20)
+              other.hitTimer = 0.35
+              other.speed *= 0.9
+              other.lane = clamp(other.lane + (other.lane <= rival.lane ? -0.18 : 0.18), -0.95, 0.95)
+              rival.attackCooldown = 1.6 + Math.random()
+              const point = relativeScreen(other.z, other.lane)
+              if (point) burst(sim, point.x, point.y - point.road * 0.18, "#ffd166", 10)
+              if (other.health <= 0) {
+                other.crashed = 3.2
+                other.speed *= 0.18
+                setMessage(sim, `${rival.name} DROPPED ${other.name}!`, 1.3)
+              } else if (Math.abs(other.z - sim.position - PLAYER_Z) < 4_000) {
+                setMessage(sim, `${rival.name} vs ${other.name}!`, 0.7)
+              }
+              break
+            }
+          }
+        }
       }
 
       for (let carIndex = 0; carIndex < sim.traffic.length; carIndex++) {
@@ -1156,8 +1182,8 @@ export default function RoadRashGame() {
 
     const render = () => {
       const sim = simRef.current
-      const shakeX = sim.shake > 0 ? (Math.random() - 0.5) * 18 * Math.min(1, sim.shake * 4) : 0
-      const shakeY = sim.shake > 0 ? (Math.random() - 0.5) * 10 * Math.min(1, sim.shake * 4) : 0
+      const shakeX = sim.shake > 0 ? (Math.random() - 0.5) * 6 * Math.min(1, sim.shake * 4) : 0
+      const shakeY = sim.shake > 0 ? (Math.random() - 0.5) * 3.5 * Math.min(1, sim.shake * 4) : 0
       ctx.save()
       ctx.translate(shakeX, shakeY)
 
@@ -1208,19 +1234,10 @@ export default function RoadRashGame() {
         }
       }
 
-      // Nitro tunnel — a cyan rush closing in from the edges while boosting.
-      if (boosting) {
-        const tunnel = ctx.createRadialGradient(VIEW_W / 2, VIEW_H * 0.5, VIEW_W * 0.16, VIEW_W / 2, VIEW_H * 0.5, VIEW_W * 0.62)
-        tunnel.addColorStop(0, "rgba(72,202,228,0)")
-        tunnel.addColorStop(1, "rgba(72,202,228,.4)")
-        ctx.fillStyle = tunnel
-        ctx.fillRect(0, 0, VIEW_W, VIEW_H)
-      }
-
       if (sim.hit > 0) {
         const flash = ctx.createRadialGradient(VIEW_W / 2, VIEW_H / 2, 80, VIEW_W / 2, VIEW_H / 2, VIEW_W * 0.7)
         flash.addColorStop(0, "rgba(255,20,40,0)")
-        flash.addColorStop(1, `rgba(255,20,40,${sim.hit * 0.55})`)
+        flash.addColorStop(1, `rgba(255,20,40,${sim.hit * 0.18})`)
         ctx.fillStyle = flash
         ctx.fillRect(0, 0, VIEW_W, VIEW_H)
       }

@@ -255,6 +255,9 @@ export default function RoadRashGame() {
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
+    // Build track immediately so the road renders behind the menu
+    if (segsRef.current.length === 0) segsRef.current = buildTrack()
+
     let raf = 0
     let last = performance.now()
     let hudTimer = 0
@@ -485,7 +488,6 @@ export default function RoadRashGame() {
       const s = state.current
       const segs = segsRef.current
       if (segs.length === 0) {
-        raf = requestAnimationFrame(loop)
         return
       }
 

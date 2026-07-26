@@ -46,6 +46,7 @@ type Rider = {
   color: string
   weave: number
   attackCooldown: number
+  trafficCooldown: number
   hitTimer: number
   crashed: number
 }
@@ -150,17 +151,18 @@ function makeSimulation(): Simulation {
     health: 100,
     weave: index * 1.7,
     attackCooldown: 1 + index * 0.3,
+    trafficCooldown: 0,
     hitTimer: 0,
     crashed: 0,
   }))
 
-  const traffic: Traffic[] = Array.from({ length: 34 }, (_, index) => ({
-    z: 10_000 + index * 7_900 + (index % 4) * 850,
-    lane: [-0.67, 0.02, 0.65, -0.22][index % 4],
-    speed: MAX_SPEED * (0.3 + (index % 5) * 0.035),
+  const traffic: Traffic[] = Array.from({ length: 22 }, (_, index) => ({
+    z: 16_000 + index * 14_500 + (index % 3) * 600,
+    lane: [-0.66, 0, 0.66, 0.66, -0.66, 0][index % 6],
+    speed: MAX_SPEED * (0.34 + (index % 5) * 0.035),
     color: ["#d8dee9", "#d1495b", "#277da1", "#f4a261", "#7f8c8d"][index % 5],
     type: index % 6 === 0 ? "van" : "car",
-    previousDz: 10_000 + index * 7_900 + (index % 4) * 850 - PLAYER_Z,
+    previousDz: 16_000 + index * 14_500 + (index % 3) * 600 - PLAYER_Z,
     hitCooldown: 0,
   }))
 
@@ -463,6 +465,7 @@ export default function RoadRashGame() {
       for (const rival of sim.rivals) {
         if (rival.hitTimer > 0) rival.hitTimer -= dt
         if (rival.attackCooldown > 0) rival.attackCooldown -= dt
+        if (rival.trafficCooldown > 0) rival.trafficCooldown -= dt
         if (rival.crashed > 0) {
           rival.crashed -= dt
           rival.speed = Math.max(0, rival.speed - MAX_SPEED * 0.45 * dt)
@@ -470,11 +473,77 @@ export default function RoadRashGame() {
         }
 
         const catchUp = rival.z < sim.position - 4_000 ? MAX_SPEED * 0.12 : 0
-        rival.speed = approach(rival.speed, rival.targetSpeed + catchUp, MAX_SPEED * 0.055 * dt)
+        let desiredSpeed = rival.targetSpeed + catchUp
+        let avoidance = 0
+        let closestBlocker: Traffic | undefined
+        let closestGap = Number.POSITIVE_INFINITY
+        for (const car of sim.traffic) {
+          const gap = car.z - rival.z
+          if (gap > 0 && gap < 2_800 && Math.abs(car.lane - rival.lane) < 0.38 && gap < closestGap) {
+            closestBlocker = car
+            closestGap = gap
+          }
+        }
+        if (closestBlocker) {
+          desiredSpeed = Math.min(desiredSpeed, closestBlocker.speed * 0.9)
+          const laneOptions = [-0.66, 0, 0.66]
+          const laneScore = (candidate: number) =>
+            sim.traffic.reduce((score, car) => {
+              const gap = car.z - rival.z
+              return score + (gap > -500 && gap < 3_200 && Math.abs(car.lane - candidate) < 0.3 ? 1 : 0)
+            }, 0)
+          const currentLaneIndex = laneOptions.reduce(
+            (best, lane, index) =>
+              Math.abs(lane - rival.lane) < Math.abs(laneOptions[best] - rival.lane) ? index : best,
+            0,
+          )
+          const candidates = [currentLaneIndex - 1, currentLaneIndex + 1].filter(
+            (index) => index >= 0 && index < laneOptions.length,
+          )
+          const targetLane = candidates
+            .map((index) => laneOptions[index])
+            .sort((a, b) => laneScore(a) - laneScore(b))[0]
+          if (targetLane !== undefined) avoidance = Math.sign(targetLane - rival.lane)
+        }
+
+        rival.speed = approach(rival.speed, desiredSpeed, MAX_SPEED * 0.11 * dt)
         rival.z += rival.speed * dt
         rival.weave += dt * (0.8 + rival.speed / MAX_SPEED)
         rival.lane += Math.sin(rival.weave) * dt * 0.075
+        rival.lane += avoidance * dt * 0.72
         rival.lane = clamp(rival.lane, -0.88, 0.88)
+
+        for (const car of sim.traffic) {
+          const carGap = car.z - rival.z
+          const hitDepth = car.type === "van" ? 175 : 145
+          const hitWidth = car.type === "van" ? 0.25 : 0.22
+          if (
+            Math.abs(carGap) < hitDepth &&
+            Math.abs(car.lane - rival.lane) < hitWidth &&
+            rival.trafficCooldown <= 0
+          ) {
+            rival.health = Math.max(0, rival.health - 24)
+            rival.hitTimer = 0.45
+            rival.trafficCooldown = 1.1
+            rival.speed *= 0.52
+            rival.lane = clamp(
+              rival.lane + (rival.lane <= car.lane ? -0.2 : 0.2),
+              -0.95,
+              0.95,
+            )
+            const impactPoint = relativeScreen(rival.z, rival.lane)
+            if (impactPoint) {
+              burst(sim, impactPoint.x, impactPoint.y - impactPoint.road * 0.12, "#ffb703", 12)
+              setMessage(sim, `${rival.name} HIT TRAFFIC!`, 0.9)
+            }
+            if (rival.health <= 0) {
+              rival.crashed = 9_999
+              rival.speed *= 0.2
+              setMessage(sim, `${rival.name} WIPED OUT!`, 1.4)
+            }
+            break
+          }
+        }
 
         const dz = rival.z - sim.position - PLAYER_Z
         const laneGap = Math.abs(rival.lane - sim.playerX)
@@ -499,14 +568,25 @@ export default function RoadRashGame() {
         }
       }
 
-      for (const car of sim.traffic) {
+      for (let carIndex = 0; carIndex < sim.traffic.length; carIndex++) {
+        const car = sim.traffic[carIndex]
         if (car.hitCooldown > 0) car.hitCooldown -= dt
         const previousDz = car.previousDz
         car.z += car.speed * dt
         let dz = car.z - sim.position - PLAYER_Z
         if (dz < -6_000) {
-          car.z = sim.position + 42_000 + Math.random() * 35_000
-          car.lane = [-0.66, 0, 0.66][Math.floor(Math.random() * 3)]
+          const farthestTraffic = sim.traffic.reduce(
+            (farthest, other) => other === car ? farthest : Math.max(farthest, other.z),
+            sim.position + 38_000,
+          )
+          car.z = farthestTraffic + 12_000 + (carIndex % 4) * 1_250
+          const laneOptions = [-0.66, 0, 0.66]
+          const nearbyLanes = sim.traffic
+            .filter((other) => other !== car && Math.abs(other.z - car.z) < 3_200)
+            .map((other) => other.lane)
+          car.lane =
+            laneOptions.find((lane) => nearbyLanes.every((occupied) => Math.abs(occupied - lane) > 0.3)) ??
+            laneOptions[carIndex % laneOptions.length]
           car.previousDz = car.z - sim.position - PLAYER_Z
           car.hitCooldown = 0
           continue
